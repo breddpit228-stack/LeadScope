@@ -30,6 +30,18 @@ jobs:
       - name: Run backend tests
         run: python run_tests.py
 
+      - name: Runtime API smoke test
+        run: |
+          python - <<'PY'
+          from fastapi.testclient import TestClient
+          import app
+          client = TestClient(app.app)
+          assert client.get('/').status_code == 200
+          assert client.get('/api/data-engine/stats').status_code == 200
+          assert client.get('/api/workspace-v2').status_code == 200
+          print('LeadScope runtime smoke test OK · version', app.app.version)
+          PY
+
       - name: Check JavaScript syntax
         run: |
           node --check static/workspace_v55.js
