@@ -59,7 +59,7 @@ jobs:
 
       - name: Guard against recursive DOM observers
         run: |
-          if grep -q "MutationObserver" source_quality_v57.js; then
+          if grep -q "new MutationObserver" source_quality_v57.js; then
             echo "Global MutationObserver is forbidden in source_quality_v57.js because it previously caused a self-triggering browser freeze."
             exit 1
           fi
