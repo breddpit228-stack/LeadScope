@@ -55,6 +55,20 @@ def _clean_ids(values: Any) -> list[int]:
     return out
 
 
+def _clean_results(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for key, result in value.items():
+        try:
+            cid = str(int(key))
+        except Exception:
+            continue
+        if isinstance(result, dict):
+            out[cid] = dict(result)
+    return out
+
+
 def _normalize(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": str(item.get("id") or ""),
@@ -66,6 +80,7 @@ def _normalize(item: dict[str, Any]) -> dict[str, Any]:
         "keywords": str(item.get("keywords") or "").strip()[:300],
         "offer": str(item.get("offer") or "").strip()[:600],
         "selected_ids": _clean_ids(item.get("selected_ids")),
+        "company_results": _clean_results(item.get("company_results")),
         "created_at": str(item.get("created_at") or _now()),
         "updated_at": str(item.get("updated_at") or _now()),
     }
@@ -86,7 +101,7 @@ def create_workspace(payload: dict[str, Any]) -> dict[str, Any]:
     store = _read()
     workspace_id = uuid.uuid4().hex[:10]
     now = _now()
-    item = _normalize({**payload, "id": workspace_id, "created_at": now, "updated_at": now, "selected_ids": []})
+    item = _normalize({**payload, "id": workspace_id, "created_at": now, "updated_at": now, "selected_ids": [], "company_results": {}})
     if not item["name"] or item["name"] == "Untitled workspace":
         industry = item.get("industry") or "Company"
         region = item.get("region") or "search"
@@ -103,9 +118,17 @@ def update_workspace(workspace_id: str, payload: dict[str, Any]) -> dict[str, An
         return None
     allowed = {"name", "industry", "region", "audience", "company_size", "keywords", "offer"}
     merged = dict(current)
+    targeting_changed = False
     for key in allowed:
         if key in payload:
-            merged[key] = payload[key]
+            new_value = payload[key]
+            if key != "name" and str(current.get(key) or "") != str(new_value or ""):
+                targeting_changed = True
+            merged[key] = new_value
+    # Workspace intelligence is relative to targeting/offer. Never keep stale scores
+    # after the user changes those inputs.
+    if targeting_changed:
+        merged["company_results"] = {}
     merged["updated_at"] = _now()
     item = _normalize(merged)
     store[str(workspace_id)] = item
@@ -147,6 +170,9 @@ def unselect_company(workspace_id: str, company_id: int) -> dict[str, Any] | Non
     cid = int(company_id)
     current = dict(current)
     current["selected_ids"] = [x for x in _clean_ids(current.get("selected_ids")) if x != cid]
+    results = _clean_results(current.get("company_results"))
+    results.pop(str(cid), None)
+    current["company_results"] = results
     current["updated_at"] = _now()
     store[str(workspace_id)] = current
     _write(store)
@@ -168,3 +194,45 @@ def select_many(workspace_id: str, company_ids: list[int]) -> dict[str, Any] | N
     store[str(workspace_id)] = current
     _write(store)
     return _normalize(current)
+
+
+def get_workspace_result(workspace_id: str, company_id: int) -> dict[str, Any] | None:
+    workspace = get_workspace(workspace_id)
+    if not workspace:
+        return None
+    result = (workspace.get("company_results") or {}).get(str(int(company_id)))
+    return dict(result) if isinstance(result, dict) else None
+
+
+def set_workspace_result(workspace_id: str, company_id: int, result: dict[str, Any]) -> dict[str, Any] | None:
+    store = _read()
+    current = store.get(str(workspace_id))
+    if not isinstance(current, dict):
+        return None
+    results = _clean_results(current.get("company_results"))
+    payload = dict(result)
+    payload["updated_at"] = _now()
+    results[str(int(company_id))] = payload
+    current = dict(current)
+    current["company_results"] = results
+    current["updated_at"] = _now()
+    store[str(workspace_id)] = current
+    _write(store)
+    return dict(payload)
+
+
+def clear_workspace_result(workspace_id: str, company_id: int) -> bool:
+    store = _read()
+    current = store.get(str(workspace_id))
+    if not isinstance(current, dict):
+        return False
+    results = _clean_results(current.get("company_results"))
+    key = str(int(company_id))
+    existed = key in results
+    results.pop(key, None)
+    current = dict(current)
+    current["company_results"] = results
+    current["updated_at"] = _now()
+    store[str(workspace_id)] = current
+    _write(store)
+    return existed
