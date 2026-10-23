@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from typing import Any
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 
 from .storage import get_company
 from .workspace_projects import (
@@ -17,6 +18,7 @@ from .workspace_projects import (
 )
 from .workspace_v7 import discover_for_workspace, workspace_detail, workspace_index
 
+ROOT = Path(__file__).resolve().parents[1]
 _BATCHES: dict[str, dict[str, Any]] = {}
 _BATCH_LOCK = threading.Lock()
 
@@ -27,6 +29,14 @@ def _batch_snapshot(workspace_id: str) -> dict[str, Any]:
 
 
 def register_workspace_routes(app, core) -> None:
+    @app.get("/assets/workspace-v70.js")
+    def workspace_v70_js():
+        return Response((ROOT / "workspace_v70.js").read_text(encoding="utf-8"), media_type="application/javascript")
+
+    @app.get("/assets/workspace-v70.css")
+    def workspace_v70_css():
+        return Response((ROOT / "workspace_v70.css").read_text(encoding="utf-8"), media_type="text/css")
+
     @app.get("/api/workspaces")
     def api_workspaces():
         return {"items": workspace_index()}
