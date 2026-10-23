@@ -14,10 +14,22 @@ if(baseResearchCompany)window.researchCompany=async function(id){
   if(window.__lsResearchActive)return;
   window.__lsResearchActive=true;
   window.__lsResearchCompany='Company';
+  showProgress('Starting research…','queued',2);
   document.querySelectorAll('button').forEach(b=>{if(/research/i.test(b.textContent||''))b.disabled=true});
   try{
-    try{const response=await fetch('/api/companies/'+id);if(response.ok){const c=await response.json();window.__lsResearchCompany=c.company||'Company'}}catch(e){}
+    try{
+      const controller=new AbortController();
+      const timer=setTimeout(()=>controller.abort(),2500);
+      const response=await fetch('/api/companies/'+id,{signal:controller.signal});
+      clearTimeout(timer);
+      if(response.ok){const c=await response.json();window.__lsResearchCompany=c.company||'Company';showProgress('Preparing research…','queued',3)}
+    }catch(e){}
     return await baseResearchCompany(id);
+  }catch(err){
+    hideProgress();
+    console.error('LeadScope research start failed',err);
+    alert('Research could not start: '+(err?.message||'Unknown error'));
+    return null;
   }finally{
     window.__lsResearchActive=false;
     document.querySelectorAll('button').forEach(b=>{if(/research/i.test(b.textContent||''))b.disabled=false});
