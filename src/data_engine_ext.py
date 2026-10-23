@@ -32,11 +32,19 @@ def _evidence_freshness(row: dict[str, Any], profile: dict[str, Any]) -> dict[st
         parsed = _parse_date(item.get("date"))
         if parsed:
             dated.append(((today - parsed).days, str(item.get("title") or item.get("type") or "Evidence")))
-    verified = _parse_date(row.get("verified_on"))
-    if verified:
-        dated.append(((today - verified).days, "Last full research"))
+
+    research_date = _parse_date(row.get("verified_on"))
+    research_age = (today - research_date).days if research_date else None
     if not dated:
-        return {"label": "Unknown", "age_days": None, "fresh_count": 0, "recent_count": 0, "historical_count": 0}
+        return {
+            "label": "Unknown",
+            "age_days": None,
+            "fresh_count": 0,
+            "recent_count": 0,
+            "historical_count": 0,
+            "research_age_days": research_age,
+        }
+
     age = min(x[0] for x in dated)
     if age <= 90:
         label = "Fresh"
@@ -52,6 +60,7 @@ def _evidence_freshness(row: dict[str, Any], profile: dict[str, Any]) -> dict[st
         "fresh_count": sum(1 for days, _ in dated if days <= 90),
         "recent_count": sum(1 for days, _ in dated if 90 < days <= 365),
         "historical_count": sum(1 for days, _ in dated if days > 730),
+        "research_age_days": research_age,
     }
 
 
@@ -118,8 +127,10 @@ def company_profile(row: dict[str, Any], icp: dict[str, Any]) -> dict[str, Any]:
             "reason": source.get("reason") or "Use a better corporate source before scoring this company.",
         }
 
+    # Change snapshots only exist after deep research. Avoid one SQLite lookup for
+    # every Indexed company when rendering a 10k-company Discover library.
     company_id = int(row.get("id") or 0)
-    changes = get_last_changes(company_id) if company_id else []
+    changes = get_last_changes(company_id) if company_id and profile.get("data_level") == "Researched" else []
     profile["changes"] = changes
     profile["changes_count"] = len(changes)
     profile["evidence_freshness"] = _evidence_freshness(row, profile)
