@@ -2,10 +2,19 @@ from __future__ import annotations
 
 from typing import Any
 
+from .change_tracking import record_snapshot
 from .service_core import analyze_company as _core_analyze_company
 from .service_core import recalculate_score as _core_recalculate_score
 from .source_quality import assess_source_quality
 from .storage import get_company, log_activity, update_company
+
+
+def _record(company_id: int, row: dict[str, Any]) -> dict[str, Any]:
+    try:
+        record_snapshot(company_id, row)
+    except Exception:
+        pass
+    return row
 
 
 def _apply_source_quality(company_id: int, row: dict[str, Any]) -> dict[str, Any]:
@@ -69,8 +78,9 @@ def analyze_company(company_id: int, fetch_live: bool = True, provider_name: str
         })
         if progress:
             progress("done", "Public access is too limited for a reliable fit score. Saved as N/A.", 100)
-        return updated or row
-    return _apply_source_quality(company_id, result)
+        return _record(company_id, updated or row)
+    final = _apply_source_quality(company_id, result)
+    return _record(company_id, final)
 
 
 def recalculate_score(company_id: int) -> dict:
