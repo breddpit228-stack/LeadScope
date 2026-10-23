@@ -38,3 +38,4 @@ jobs:
           node --check data_engine_v60.js
           node --check workspace_v61.js
           node --check changes_v62.js
+          node --check identity_v63.js
