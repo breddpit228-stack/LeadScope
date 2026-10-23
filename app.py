@@ -10,13 +10,14 @@ from fastapi import HTTPException
 import app_core as _core
 from app_core import *  # noqa: F401,F403
 from src.data_engine_ext import company_profile, summarize_library
+from src.identity_resolver import resolve_company_identity
 from src.library_sources import fetch_wikidata_europe_companies
 from src.storage import bulk_import_seed, company_count, get_company, get_icp, list_companies
 from src.workspace_state import ensure_workspace_initialized, remove_workspace_account, set_workspace_account
 
 ROOT = Path(__file__).resolve().parent
 app = _core.app
-app.version = "6.2"
+app.version = "6.3"
 
 
 def _read(name: str) -> str:
@@ -221,6 +222,17 @@ def api_workspace_remove(company_id: int):
     return {"ok": remove_workspace_account(company_id), "company_id": company_id}
 
 
+@app.get("/api/companies/{company_id}/identity")
+def api_company_identity(company_id: int):
+    row = get_company(company_id)
+    if not row:
+        raise HTTPException(404, "Company not found")
+    try:
+        return resolve_company_identity(str(row.get("company") or ""), str(row.get("website") or ""))
+    except Exception as exc:
+        raise HTTPException(502, f"Public identity lookup unavailable: {type(exc).__name__}: {str(exc)[:220]}") from exc
+
+
 @app.get("/api/companies/{company_id}/intelligence")
 def api_company_intelligence(company_id: int):
     row = get_company(company_id)
@@ -235,6 +247,7 @@ _extra_css = "\n".join([
     _read("data_engine_v60.css"),
     _read("workspace_v61.css"),
     _read("changes_v62.css"),
+    _read("identity_v63.css"),
 ])
 _extra_js = "\n".join([
     _read("workspace_loader_v56.js"),
@@ -242,6 +255,7 @@ _extra_js = "\n".join([
     _read("data_engine_v60.js"),
     _read("workspace_v61.js"),
     _read("changes_v62.js"),
+    _read("identity_v63.js"),
 ])
 
 _core.HTML = _core.HTML.replace("</style>", _extra_css + "\n</style>").replace(
