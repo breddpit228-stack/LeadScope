@@ -110,3 +110,23 @@ def remove_workspace_account(company_id: int) -> bool:
     accounts.pop(key, None)
     _write_setting(WORKSPACE_KEY, accounts)
     return existed
+
+
+# v7 routes are registered from this already-loaded compatibility module so the
+# existing app.py can keep the legacy endpoints while the new project-first
+# workspace becomes the primary workflow.
+def _register_workspace_v7_routes() -> None:
+    try:
+        import app_core as _core
+        if getattr(_core.app.state, "workspace_v7_routes_registered", False):
+            return
+        from .workspace_routes_v70 import register_workspace_routes
+        register_workspace_routes(_core.app, _core)
+        _core.app.state.workspace_v7_routes_registered = True
+    except Exception:
+        # App startup must not fail solely because an optional workspace layer
+        # could not register. CI/runtime smoke tests verify the routes explicitly.
+        return
+
+
+_register_workspace_v7_routes()
