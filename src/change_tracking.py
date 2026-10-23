@@ -68,10 +68,17 @@ def _signal_records(value: Any) -> list[dict[str, Any]]:
     return [x for x in _list(value) if isinstance(x, dict) and str(x.get("fact") or "").strip()]
 
 
+def _number(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value or 0))
+    except Exception:
+        return default
+
+
 def make_snapshot(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "research_score": int(row.get("research_score") or 0),
+        "research_score": _number(row.get("research_score")),
         "quality_status": str(row.get("quality_status") or ""),
         "services": _strings(row.get("services_json")),
         "target_roles": _strings(row.get("target_roles_json")),
@@ -97,7 +104,7 @@ def compare_snapshots(previous: dict[str, Any], current: dict[str, Any]) -> list
                 "title": fact,
                 "date": str(signal.get("observed_date") or current.get("captured_at") or ""),
                 "source_url": str(signal.get("source_url") or ""),
-                "importance": int(signal.get("signal_value") or 0),
+                "importance": _number(signal.get("signal_value")),
             })
 
     old_services = {x.lower() for x in previous.get("services", []) if isinstance(x, str)}
@@ -122,8 +129,8 @@ def compare_snapshots(previous: dict[str, Any], current: dict[str, Any]) -> list
                 "importance": 35,
             })
 
-    old_score = int(previous.get("research_score") or 0)
-    new_score = int(current.get("research_score") or 0)
+    old_score = _number(previous.get("research_score"))
+    new_score = _number(current.get("research_score"))
     delta = new_score - old_score
     if abs(delta) >= 5:
         changes.append({
@@ -134,7 +141,7 @@ def compare_snapshots(previous: dict[str, Any], current: dict[str, Any]) -> list
             "importance": min(80, 40 + abs(delta)),
         })
 
-    changes.sort(key=lambda x: int(x.get("importance") or 0), reverse=True)
+    changes.sort(key=lambda x: _number(x.get("importance")), reverse=True)
     return changes[:20]
 
 
