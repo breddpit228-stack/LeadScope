@@ -33,7 +33,15 @@ async function renderQueue(){let w=await workspaceData(true),rows=w.research_que
 window.addToWorkspace=async function(id,state='active'){await fetch('/api/workspace-v2/accounts/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({state})});workspaceV2Cache=null;return true}
 window.setWorkspaceState=async function(id,state){await fetch('/api/workspace-v2/accounts/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({state})});workspaceV2Cache=null;showWorkspace(state==='monitor'?'monitorV2':'accounts')}
 window.removeFromWorkspace=async function(id){await fetch('/api/workspace-v2/accounts/'+id,{method:'DELETE'});workspaceV2Cache=null;showWorkspace('accounts')}
-const oldResearch=window.researchCompany;if(oldResearch)window.researchCompany=async function(id){await fetch('/api/workspace-v2/accounts/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:'queue'})});workspaceV2Cache=null;return oldResearch(id)}
+const oldResearch=window.researchCompany;
+if(oldResearch)window.researchCompany=function(id){
+  // Workspace membership is bookkeeping, not a prerequisite for research.
+  // Fire-and-forget so a SQLite lock or slow write can never make the Research button look dead.
+  fetch('/api/workspace-v2/accounts/'+id,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:'queue'})})
+    .then(()=>{workspaceV2Cache=null})
+    .catch(()=>{});
+  return oldResearch(id);
+}
 const oldShow=window.showWorkspace;window.showWorkspace=function(view='today'){let map={overview:'today',companies:'accounts',opportunities:'opportunitiesV2'};view=map[view]||view;if(!['today','accounts','opportunitiesV2','monitorV2','queueV2'].includes(view))return oldShow(view);document.querySelector('#homeView').classList.add('hidden');document.querySelector('#workspaceView').classList.remove('hidden');['overview','companies','opportunities','discover','activity','icp','report','todayV2','accountsV2','opportunitiesV2','monitorV2','queueV2'].forEach(x=>{let el=document.querySelector('#'+x+'Page');if(el)el.classList.add('hidden')});let page=document.querySelector('#'+view+'Page');if(page)page.classList.remove('hidden');document.querySelectorAll('.side button[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===view));if(view==='today')renderToday();if(view==='accounts')renderAccounts();if(view==='opportunitiesV2')renderOpportunities();if(view==='monitorV2')renderMonitor();if(view==='queueV2')renderQueue();window.scrollTo({top:0,behavior:'smooth'})}
 const oldHomeResult=window.renderHomeResult;if(oldHomeResult)window.renderHomeResult=function(c){oldHomeResult(c);let actions=document.querySelector('#homeResult .resultActions');if(actions&&!actions.querySelector('.addWorkspaceBtn'))actions.insertAdjacentHTML('afterbegin',`<button class="secondary addWorkspaceBtn" onclick="addToWorkspace(${c.id})">+ Add to Workspace</button>`)}
 patchWorkspaceV2Dom();setTimeout(()=>{let w=document.querySelector('#workspaceView');if(w&&!w.classList.contains('hidden'))showWorkspace('today')},0);
