@@ -9,14 +9,14 @@ from fastapi import HTTPException
 
 import app_core as _core
 from app_core import *  # noqa: F401,F403
-from src.data_engine import company_profile, summarize_library
+from src.data_engine_ext import company_profile, summarize_library
 from src.library_sources import fetch_wikidata_europe_companies
 from src.storage import bulk_import_seed, company_count, get_company, get_icp, list_companies
 from src.workspace_state import ensure_workspace_initialized, remove_workspace_account, set_workspace_account
 
 ROOT = Path(__file__).resolve().parent
 app = _core.app
-app.version = "6.0"
+app.version = "6.2"
 
 
 def _read(name: str) -> str:
@@ -43,7 +43,7 @@ _LIBRARY_EXPAND_LOCK = threading.Lock()
 def _library_expand_worker(target: int = 10000) -> None:
     target = max(1000, min(int(target), 10000))
     with _LIBRARY_EXPAND_LOCK:
-        _LIBRARY_EXPAND.update(status="running", target=target, added=0, checked=0, message="Indexing public European companies…")
+        _LIBRARY_EXPAND.update(status="running", target=target, message="Indexing public European companies…")
     offset = 0
     batch_size = 250
     total_added = 0
@@ -60,22 +60,44 @@ def _library_expand_worker(target: int = 10000) -> None:
             total_added += int(result.get("added") or 0)
             offset += batch_size
             with _LIBRARY_EXPAND_LOCK:
-                _LIBRARY_EXPAND.update(added=total_added, checked=offset, message=f"{company_count()} companies indexed · checking public source batch {offset // batch_size}")
+                _LIBRARY_EXPAND.update(
+                    added=total_added,
+                    checked=offset,
+                    message=f"{company_count()} companies indexed · checking public source batch {offset // batch_size}",
+                )
             time.sleep(0.8)
         with _LIBRARY_EXPAND_LOCK:
-            _LIBRARY_EXPAND.update(status="done", added=total_added, checked=offset, message=f"Library now contains {company_count()} companies")
+            _LIBRARY_EXPAND.update(
+                status="done",
+                added=total_added,
+                checked=offset,
+                message=f"Library now contains {company_count()} companies",
+            )
     except Exception as exc:
         with _LIBRARY_EXPAND_LOCK:
-            _LIBRARY_EXPAND.update(status="error", added=total_added, checked=offset, message=f"Library expansion paused: {type(exc).__name__}: {str(exc)[:240]}")
+            _LIBRARY_EXPAND.update(
+                status="error",
+                added=total_added,
+                checked=offset,
+                message=f"Library expansion paused: {type(exc).__name__}: {str(exc)[:240]}",
+            )
 
 
 @app.post("/api/library/expand")
 def api_library_expand(target: int = 10000):
+    target = max(1000, min(int(target), 10000))
     with _LIBRARY_EXPAND_LOCK:
-        if _LIBRARY_EXPAND.get("status") == "running":
+        if _LIBRARY_EXPAND.get("status") in {"running", "starting"}:
             return dict(_LIBRARY_EXPAND)
+        _LIBRARY_EXPAND.update(
+            status="starting",
+            target=target,
+            added=0,
+            checked=0,
+            message="Starting public company indexing…",
+        )
     threading.Thread(target=_library_expand_worker, args=(target,), daemon=True, name="library-expand").start()
-    return {"status": "starting", "target": max(1000, min(int(target), 10000))}
+    return {"status": "starting", "target": target}
 
 
 @app.get("/api/library/expand/status")
@@ -136,16 +158,36 @@ def api_workspace_v2():
         return int(((item.get("decision") or {}).get("priority") or 0))
 
     accounts.sort(key=lambda x: (-priority_value(x), str(x.get("company") or "").lower()))
-    contact = [x for x in accounts if (x.get("decision") or {}).get("decision") == "CONTACT"]
-    monitor = [x for x in accounts if (x.get("decision") or {}).get("decision") == "MONITOR" or (x.get("workspace_state") or {}).get("state") == "monitor"]
-    queue = [x for x in accounts if x.get("data_level") != "Researched" or (x.get("decision") or {}).get("decision") in {"RESEARCH", "SOURCE NEEDED"}]
+    contact = [
+        x for x in accounts
+        if (x.get("decision") or {}).get("decision") == "CONTACT"
+        and (x.get("workspace_state") or {}).get("state") != "monitor"
+    ]
+    monitor = [
+        x for x in accounts
+        if (x.get("decision") or {}).get("decision") == "MONITOR"
+        or (x.get("workspace_state") or {}).get("state") == "monitor"
+    ]
+    queue = [
+        x for x in accounts
+        if (x.get("workspace_state") or {}).get("state") == "queue"
+        or x.get("data_level") != "Researched"
+        or (x.get("decision") or {}).get("decision") in {"RESEARCH", "SOURCE NEEDED"}
+    ]
     source_issues = [x for x in accounts if (x.get("decision") or {}).get("decision") == "SOURCE NEEDED"]
+    changes_count = sum(int(x.get("changes_count") or 0) for x in accounts)
 
     library_profiles = [company_profile(row, icp) for row in _library_rows(max_rows=10000)]
     member_ids = {int(k) for k in state.keys()}
-    suggestions = [x for x in library_profiles if int(x.get("id") or 0) not in member_ids and x.get("data_level") != "Researched"]
+    suggestions = [
+        x for x in library_profiles
+        if int(x.get("id") or 0) not in member_ids and x.get("data_level") != "Researched"
+    ]
     suggestions = [x for x in suggestions if (x.get("source") or {}).get("status") != "Needs better source"]
-    suggestions.sort(key=lambda x: (-int((x.get("icp_prefilter") or {}).get("score") or 0), -int(x.get("completeness") or 0)))
+    suggestions.sort(key=lambda x: (
+        -int((x.get("icp_prefilter") or {}).get("score") or 0),
+        -int(x.get("completeness") or 0),
+    ))
 
     return {
         "counts": {
@@ -154,6 +196,7 @@ def api_workspace_v2():
             "monitor": len(monitor),
             "research_queue": len(queue),
             "source_issues": len(source_issues),
+            "changes": changes_count,
         },
         "accounts": accounts,
         "contact": contact,
@@ -191,12 +234,14 @@ _extra_css = "\n".join([
     _read("source_quality_v57.css"),
     _read("data_engine_v60.css"),
     _read("workspace_v61.css"),
+    _read("changes_v62.css"),
 ])
 _extra_js = "\n".join([
     _read("workspace_loader_v56.js"),
     _read("source_quality_v57.js"),
     _read("data_engine_v60.js"),
     _read("workspace_v61.js"),
+    _read("changes_v62.js"),
 ])
 
 _core.HTML = _core.HTML.replace("</style>", _extra_css + "\n</style>").replace(
