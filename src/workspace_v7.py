@@ -173,7 +173,17 @@ def discover_for_workspace(workspace_id: str, q: str = "", limit: int = 120) -> 
         -int(x.get("completeness") or 0),
         str(x.get("company") or "").lower(),
     ))
-    return {"workspace": workspace, "items": items[:max(1, min(int(limit), 250))], "total_candidates": len(items)}
+    qualified = [
+        x for x in items
+        if int((x.get("profile_match") or {}).get("score") or 0) >= 35 or bool(x.get("selected"))
+    ]
+    if not qualified and items:
+        qualified = items[:20]
+    return {
+        "workspace": workspace,
+        "items": qualified[:max(1, min(int(limit), 250))],
+        "total_candidates": len(qualified),
+    }
 
 
 def selected_profiles(workspace: dict[str, Any]) -> list[dict[str, Any]]:
