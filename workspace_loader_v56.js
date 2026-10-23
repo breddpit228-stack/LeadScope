@@ -7,7 +7,20 @@ function installWorkspaceResearchLoader(){
 function workspaceStageKey(stage){stage=String(stage||'').toLowerCase();if(stage.includes('fetch')||stage.includes('crawl')||stage.includes('open'))return'fetching';if(stage.includes('research')||stage.includes('extract')||stage.includes('validat'))return'researching';if(stage.includes('score'))return'scoring';if(stage.includes('outreach')||stage.includes('report')||stage.includes('done')||stage.includes('complete'))return'outreach';return'queued'}
 function updateWorkspaceSteps(stage){const order=['queued','fetching','researching','scoring','outreach'],active=workspaceStageKey(stage),activeIndex=order.indexOf(active);document.querySelectorAll('.wsResearchStep').forEach(el=>{const idx=order.indexOf(el.dataset.wsStage);el.classList.toggle('done',idx<activeIndex);el.classList.toggle('active',idx===activeIndex)})}
 installWorkspaceResearchLoader();
-window.showProgress=function(text,stage,pct){const overlay=document.querySelector('#progress');if(!overlay)return;overlay.classList.add('workspaceSaasProgress');overlay.classList.remove('hidden');document.querySelector('#workspaceView')?.classList.add('workspaceResearching');const company=window.__lsResearchCompany||'Company';const title=document.querySelector('#wsResearchTitle');if(title)title.textContent=`Researching ${company}`;const msg=document.querySelector('#wsResearchText');if(msg)msg.textContent=text||'Researching…';const st=document.querySelector('#wsResearchStage');if(st)st.textContent=stage||'queued';const value=Math.max(0,Math.min(100,Math.round(Number(pct)||0)));const val=document.querySelector('#wsResearchPctValue');if(val)val.textContent=String(value);const bar=document.querySelector('#wsResearchBar');if(bar)bar.style.width=Math.max(3,value)+'%';updateWorkspaceSteps(stage)};
+window.showProgress=function(text,stage,pct){const overlay=document.querySelector('#progress');if(!overlay)return;overlay.classList.add('workspaceSaasProgress');overlay.classList.remove('hidden');document.querySelector('#workspaceView')?.classList.add('workspaceResearching');const company=window.__lsResearchCompany||'Company';const title=document.querySelector('#wsResearchTitle');if(title&&title.textContent!==`Researching ${company}`)title.textContent=`Researching ${company}`;const msg=document.querySelector('#wsResearchText');if(msg&&msg.textContent!==(text||'Researching…'))msg.textContent=text||'Researching…';const st=document.querySelector('#wsResearchStage');if(st&&st.textContent!==(stage||'queued'))st.textContent=stage||'queued';const value=Math.max(0,Math.min(100,Math.round(Number(pct)||0)));const val=document.querySelector('#wsResearchPctValue');if(val&&val.textContent!==String(value))val.textContent=String(value);const bar=document.querySelector('#wsResearchBar');if(bar)bar.style.width=Math.max(3,value)+'%';updateWorkspaceSteps(stage)};
 window.hideProgress=function(){const overlay=document.querySelector('#progress');if(overlay){overlay.classList.add('hidden');overlay.classList.remove('workspaceSaasProgress')}document.querySelector('#workspaceView')?.classList.remove('workspaceResearching')};
-const baseResearchCompany=window.researchCompany;if(baseResearchCompany)window.researchCompany=async function(id){window.__lsResearchCompany='Company';try{const response=await fetch('/api/companies/'+id);if(response.ok){const c=await response.json();window.__lsResearchCompany=c.company||'Company'}}catch(e){}return baseResearchCompany(id)};
+const baseResearchCompany=window.researchCompany;
+if(baseResearchCompany)window.researchCompany=async function(id){
+  if(window.__lsResearchActive)return;
+  window.__lsResearchActive=true;
+  window.__lsResearchCompany='Company';
+  document.querySelectorAll('button').forEach(b=>{if(/research/i.test(b.textContent||''))b.disabled=true});
+  try{
+    try{const response=await fetch('/api/companies/'+id);if(response.ok){const c=await response.json();window.__lsResearchCompany=c.company||'Company'}}catch(e){}
+    return await baseResearchCompany(id);
+  }finally{
+    window.__lsResearchActive=false;
+    document.querySelectorAll('button').forEach(b=>{if(/research/i.test(b.textContent||''))b.disabled=false});
+  }
+};
 })();
