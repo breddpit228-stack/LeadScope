@@ -106,3 +106,14 @@ window.researchAndAddToWorkspace=function(id){
   return window.researchCompany(id);
 };
 })();
+
+/* Workspace v7 is intentionally loaded last, after all legacy compatibility layers. */
+(function(){
+  if(document.querySelector('script[data-leadscope-workspace-v7]'))return;
+  const script=document.createElement('script');
+  script.src='/assets/workspace-v70.js?v=7.0';
+  script.async=false;
+  script.dataset.leadscopeWorkspaceV7='1';
+  script.onerror=()=>console.error('LeadScope Workspace v7 UI failed to load.');
+  document.body.appendChild(script);
+})();
