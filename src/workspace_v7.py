@@ -73,6 +73,37 @@ def profile_match(profile: dict[str, Any], workspace: dict[str, Any]) -> dict[st
     return {"score": max(0, min(100, score)), "label": label, "matched": matched[:4], "gaps": gaps}
 
 
+def _workspace_decision(profile: dict[str, Any], match: dict[str, Any]) -> dict[str, Any]:
+    base = dict(profile.get("decision") or {})
+    if profile.get("data_level") != "Researched":
+        return {"decision": "RESEARCH", "fit": None, "timing": None, "confidence": None, "priority": None,
+                "reason": "Select and research this company before making a sales decision."}
+    if base.get("decision") == "SOURCE NEEDED":
+        return base
+
+    fit = int(match.get("score") or 0)
+    timing = int(base.get("timing") or 20)
+    confidence = int(base.get("confidence") or 55)
+    priority = round(fit * 0.55 + timing * 0.35 + confidence * 0.10)
+
+    if fit >= 60 and timing >= 55 and confidence >= 55 and priority >= 60:
+        decision = "CONTACT"
+    elif fit >= 60 and confidence >= 50:
+        decision = "MONITOR"
+    elif fit < 45 and confidence >= 50:
+        decision = "SKIP"
+    else:
+        decision = "REVIEW"
+    return {
+        "decision": decision,
+        "fit": fit,
+        "timing": timing,
+        "confidence": confidence,
+        "priority": priority,
+        "reason": "Workspace decision combines this workspace's profile match with researched timing and evidence confidence.",
+    }
+
+
 def _candidate_rows(workspace: dict[str, Any], q: str = "", scan_limit: int = 900) -> list[dict[str, Any]]:
     seen: dict[int, dict[str, Any]] = {}
 
@@ -93,8 +124,6 @@ def _candidate_rows(workspace: dict[str, Any], q: str = "", scan_limit: int = 90
         for row in list_companies(q=query, limit=min(scan_limit, 600), offset=0):
             seen[int(row["id"])] = row
 
-    # Always mix in a bounded general sample so imperfect seed classifications do not
-    # make a workspace look empty simply because one keyword was absent.
     if len(seen) < 350:
         for row in list_companies(limit=min(scan_limit, 600), offset=0):
             seen[int(row["id"])] = row
@@ -131,7 +160,10 @@ def selected_profiles(workspace: dict[str, Any]) -> list[dict[str, Any]]:
         if not row:
             continue
         profile = full_company_profile(row, icp)
-        profile["profile_match"] = profile_match(profile, workspace)
+        match = profile_match(profile, workspace)
+        profile["profile_match"] = match
+        profile["research_decision"] = dict(profile.get("decision") or {})
+        profile["decision"] = _workspace_decision(profile, match)
         rows.append(profile)
     rows.sort(key=lambda x: (
         0 if x.get("data_level") == "Researched" else 1,
