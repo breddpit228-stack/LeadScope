@@ -36,7 +36,6 @@ jobs:
           import app
           html = app.home()
           assert isinstance(html, str) and len(html) > 1000
-          assert app.app.version == '6.5'
           assert 'LeadScope research failed to start or complete' in html
           stats = app.api_data_engine_stats()
           workspace = app.api_workspace_v2()
@@ -47,6 +46,41 @@ jobs:
           assert isinstance(suggestions, dict) and 'items' in suggestions
           assert isinstance(library, dict) and 'items' in library
           print('LeadScope runtime smoke test OK · version', app.app.version)
+          PY
+
+      - name: Workspace v7 flow smoke test
+        run: |
+          python - <<'PY'
+          import app
+
+          def endpoint(path, method='GET'):
+              for route in app.app.routes:
+                  if getattr(route, 'path', None) == path and method in (getattr(route, 'methods', None) or set()):
+                      return route.endpoint
+              raise AssertionError(f'Missing route {method} {path}')
+
+          create = endpoint('/api/workspaces', 'POST')
+          index = endpoint('/api/workspaces', 'GET')
+          detail = endpoint('/api/workspaces/{workspace_id}', 'GET')
+          discover = endpoint('/api/workspaces/{workspace_id}/discover', 'GET')
+          select = endpoint('/api/workspaces/{workspace_id}/selected/{company_id}', 'POST')
+          remove = endpoint('/api/workspaces/{workspace_id}', 'DELETE')
+          js_asset = endpoint('/assets/workspace-v70.js', 'GET')
+
+          ws = create({'name':'CI Fintech','industry':'Fintech','region':'Europe','audience':'B2B','keywords':'payments','offer':'Research automation'})
+          assert ws['id']
+          assert any(x['id'] == ws['id'] for x in index()['items'])
+          found = discover(ws['id'], q='', limit=10)
+          assert 'items' in found and 'total_candidates' in found
+          if found['items']:
+              cid = int(found['items'][0]['id'])
+              select(ws['id'], cid)
+              state = detail(ws['id'])
+              assert state['counts']['selected'] >= 1
+          asset = js_asset()
+          assert b'Your workspaces' in asset.body and b'openV7Workspace' in asset.body
+          assert remove(ws['id'])['ok'] is True
+          print('Workspace v7 flow OK')
           PY
 
       - name: Check JavaScript syntax
@@ -60,10 +94,11 @@ jobs:
           node --check identity_v63.js
           node --check performance_v64.js
           node --check research_controller_v65.js
+          node --check workspace_v70.js
 
       - name: Guard against recursive DOM observers
         run: |
-          if grep -q "new MutationObserver" source_quality_v57.js changes_v62.js; then
-            echo "Global MutationObserver is forbidden in source quality/change tracking UI because it can create self-triggering browser work."
+          if grep -q "new MutationObserver" source_quality_v57.js changes_v62.js workspace_v70.js; then
+            echo "Global MutationObserver is forbidden in workspace UI because it can create self-triggering browser work."
             exit 1
           fi
