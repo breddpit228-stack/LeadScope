@@ -9,32 +9,29 @@ from fastapi import HTTPException
 
 import app_core as _core
 from app_core import *  # noqa: F401,F403
-from src.data_engine_ext import company_profile, summarize_library
+from src.data_engine import company_profile as basic_company_profile
+from src.data_engine import summarize_library
+from src.data_engine_ext import company_profile
 from src.identity_resolver import resolve_company_identity
 from src.library_sources import fetch_wikidata_europe_companies
-from src.storage import bulk_import_seed, company_count, get_company, get_icp, list_companies
+from src.storage import (
+    bulk_import_seed,
+    company_count,
+    dashboard_stats,
+    get_company,
+    get_icp,
+    list_companies,
+)
 from src.workspace_state import ensure_workspace_initialized, remove_workspace_account, set_workspace_account
 
 ROOT = Path(__file__).resolve().parent
 app = _core.app
-app.version = "6.3"
+app.version = "6.3.1"
 
 
 def _read(name: str) -> str:
     path = ROOT / name
     return path.read_text(encoding="utf-8") if path.exists() else ""
-
-
-def _library_rows(q: str = "", max_rows: int = 12000) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    offset = 0
-    while len(rows) < max_rows:
-        batch = list_companies(q=q, limit=2000, offset=offset)
-        rows.extend(batch)
-        if len(batch) < 2000:
-            break
-        offset += 2000
-    return rows[:max_rows]
 
 
 _LIBRARY_EXPAND = {"status": "idle", "target": 10000, "added": 0, "checked": 0, "message": ""}
@@ -107,18 +104,17 @@ def api_library_expand_status():
         return dict(_LIBRARY_EXPAND) | {"company_count": company_count()}
 
 
-@app.get("/api/library")
-def api_library(q: str = "", level: str = "", decision: str = "", audience: str = "", limit: int = 200, offset: int = 0):
-    rows = _library_rows(q=q)
-    icp = get_icp()
-    profiles = [company_profile(row, icp) for row in rows]
+def _filter_profiles(profiles: list[dict[str, Any]], level: str, decision: str, audience: str) -> list[dict[str, Any]]:
     if level:
         profiles = [x for x in profiles if str(x.get("data_level") or "").lower() == level.lower()]
     if decision:
         profiles = [x for x in profiles if str((x.get("decision") or {}).get("decision") or "").lower() == decision.lower()]
     if audience:
         profiles = [x for x in profiles if audience.lower() in str(x.get("audience") or "").lower()]
+    return profiles
 
+
+def _sort_profiles(profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
     decision_rank = {"CONTACT": 0, "MONITOR": 1, "REVIEW": 2, "RESEARCH": 3, "SOURCE NEEDED": 4, "SKIP": 5}
     profiles.sort(key=lambda x: (
         decision_rank.get(str((x.get("decision") or {}).get("decision") or ""), 9),
@@ -126,22 +122,59 @@ def api_library(q: str = "", level: str = "", decision: str = "", audience: str 
         -int(x.get("completeness") or 0),
         str(x.get("company") or "").lower(),
     ))
-    total = len(profiles)
+    return profiles
+
+
+@app.get("/api/library")
+def api_library(q: str = "", level: str = "", decision: str = "", audience: str = "", limit: int = 200, offset: int = 0):
+    """Fast, paged Company Library.
+
+    Important: this endpoint never enriches the whole database synchronously. Advanced
+    filters scan a bounded window; normal browsing only profiles the requested page.
+    """
+    limit = max(1, min(int(limit), 250))
     offset = max(0, int(offset))
-    limit = max(1, min(int(limit), 500))
-    return {"items": profiles[offset:offset + limit], "count": total, "summary": summarize_library(profiles)}
+    has_advanced_filter = bool(level or decision or audience)
+    scan_limit = min(1200, max(limit * 4, 300)) if has_advanced_filter else limit
+    scan_offset = 0 if has_advanced_filter else offset
+    rows = list_companies(q=q, limit=scan_limit, offset=scan_offset)
+    icp = get_icp()
+    profiles = [basic_company_profile(row, icp) for row in rows]
+    profiles = _filter_profiles(profiles, level, decision, audience)
+    profiles = _sort_profiles(profiles)
+    if has_advanced_filter:
+        profiles = profiles[offset:offset + limit]
+
+    sample_summary = summarize_library(profiles)
+    db_stats = dashboard_stats()
+    summary = {
+        **sample_summary,
+        "total": int(db_stats.get("total") or company_count()),
+        "researched": int(db_stats.get("researched") or 0),
+        "scope": "page",
+    }
+    return {"items": profiles[:limit], "count": len(profiles), "summary": summary}
 
 
 @app.get("/api/data-engine/stats")
 def api_data_engine_stats():
-    rows = _library_rows()
+    """Lightweight library stats; no full-database profile loop."""
+    db_stats = dashboard_stats()
+    sample_rows = list_companies(limit=250, offset=0)
     icp = get_icp()
-    profiles = [company_profile(row, icp) for row in rows]
-    return summarize_library(profiles)
+    sample = [basic_company_profile(row, icp) for row in sample_rows]
+    summary = summarize_library(sample)
+    summary.update({
+        "total": int(db_stats.get("total") or 0),
+        "researched": int(db_stats.get("researched") or 0),
+        "sample_size": len(sample),
+    })
+    return summary
 
 
 @app.get("/api/workspace-v2")
 def api_workspace_v2():
+    """Return only real workspace accounts. Never scan the Company Library here."""
     state = ensure_workspace_initialized()
     icp = get_icp()
     accounts: list[dict[str, Any]] = []
@@ -178,18 +211,6 @@ def api_workspace_v2():
     source_issues = [x for x in accounts if (x.get("decision") or {}).get("decision") == "SOURCE NEEDED"]
     changes_count = sum(int(x.get("changes_count") or 0) for x in accounts)
 
-    library_profiles = [company_profile(row, icp) for row in _library_rows(max_rows=10000)]
-    member_ids = {int(k) for k in state.keys()}
-    suggestions = [
-        x for x in library_profiles
-        if int(x.get("id") or 0) not in member_ids and x.get("data_level") != "Researched"
-    ]
-    suggestions = [x for x in suggestions if (x.get("source") or {}).get("status") != "Needs better source"]
-    suggestions.sort(key=lambda x: (
-        -int((x.get("icp_prefilter") or {}).get("score") or 0),
-        -int(x.get("completeness") or 0),
-    ))
-
     return {
         "counts": {
             "accounts": len(accounts),
@@ -204,8 +225,29 @@ def api_workspace_v2():
         "monitor": monitor,
         "research_queue": queue,
         "source_issues": source_issues,
-        "suggestions": suggestions[:12],
     }
+
+
+@app.get("/api/workspace-v2/suggestions")
+def api_workspace_suggestions(limit: int = 6):
+    """Small independent recommendation query so Today can render immediately."""
+    limit = max(1, min(int(limit), 12))
+    state = ensure_workspace_initialized()
+    member_ids = {int(k) for k in state.keys()}
+    icp = get_icp()
+    # A bounded sample is deliberate: suggestions must never block the workspace.
+    rows = list_companies(limit=400, offset=0)
+    profiles = [basic_company_profile(row, icp) for row in rows if int(row.get("id") or 0) not in member_ids]
+    profiles = [
+        x for x in profiles
+        if x.get("data_level") != "Researched"
+        and (x.get("source") or {}).get("status") != "Needs better source"
+    ]
+    profiles.sort(key=lambda x: (
+        -int((x.get("icp_prefilter") or {}).get("score") or 0),
+        -int(x.get("completeness") or 0),
+    ))
+    return {"items": profiles[:limit]}
 
 
 @app.post("/api/workspace-v2/accounts/{company_id}")
