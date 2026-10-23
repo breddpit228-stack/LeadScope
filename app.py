@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import threading
 import time
+from typing import Any
 
 from fastapi import HTTPException
 
@@ -11,6 +12,7 @@ from app_core import *  # noqa: F401,F403
 from src.data_engine import company_profile, summarize_library
 from src.library_sources import fetch_wikidata_europe_companies
 from src.storage import bulk_import_seed, company_count, get_company, get_icp, list_companies
+from src.workspace_state import ensure_workspace_initialized, remove_workspace_account, set_workspace_account
 
 ROOT = Path(__file__).resolve().parent
 app = _core.app
@@ -20,6 +22,18 @@ app.version = "6.0"
 def _read(name: str) -> str:
     path = ROOT / name
     return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def _library_rows(q: str = "", max_rows: int = 12000) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    offset = 0
+    while len(rows) < max_rows:
+        batch = list_companies(q=q, limit=2000, offset=offset)
+        rows.extend(batch)
+        if len(batch) < 2000:
+            break
+        offset += 2000
+    return rows[:max_rows]
 
 
 _LIBRARY_EXPAND = {"status": "idle", "target": 10000, "added": 0, "checked": 0, "message": ""}
@@ -72,7 +86,7 @@ def api_library_expand_status():
 
 @app.get("/api/library")
 def api_library(q: str = "", level: str = "", decision: str = "", audience: str = "", limit: int = 200, offset: int = 0):
-    rows = list_companies(q=q, limit=2000)
+    rows = _library_rows(q=q)
     icp = get_icp()
     profiles = [company_profile(row, icp) for row in rows]
     if level:
@@ -97,10 +111,71 @@ def api_library(q: str = "", level: str = "", decision: str = "", audience: str 
 
 @app.get("/api/data-engine/stats")
 def api_data_engine_stats():
-    rows = list_companies(limit=2000)
+    rows = _library_rows()
     icp = get_icp()
     profiles = [company_profile(row, icp) for row in rows]
     return summarize_library(profiles)
+
+
+@app.get("/api/workspace-v2")
+def api_workspace_v2():
+    state = ensure_workspace_initialized()
+    icp = get_icp()
+    accounts: list[dict[str, Any]] = []
+    for key, meta in state.items():
+        if str(meta.get("state") or "active") == "archived":
+            continue
+        row = get_company(int(key))
+        if not row:
+            continue
+        profile = company_profile(row, icp)
+        profile["workspace_state"] = meta
+        accounts.append(profile)
+
+    def priority_value(item: dict[str, Any]) -> int:
+        return int(((item.get("decision") or {}).get("priority") or 0))
+
+    accounts.sort(key=lambda x: (-priority_value(x), str(x.get("company") or "").lower()))
+    contact = [x for x in accounts if (x.get("decision") or {}).get("decision") == "CONTACT"]
+    monitor = [x for x in accounts if (x.get("decision") or {}).get("decision") == "MONITOR" or (x.get("workspace_state") or {}).get("state") == "monitor"]
+    queue = [x for x in accounts if x.get("data_level") != "Researched" or (x.get("decision") or {}).get("decision") in {"RESEARCH", "SOURCE NEEDED"}]
+    source_issues = [x for x in accounts if (x.get("decision") or {}).get("decision") == "SOURCE NEEDED"]
+
+    library_profiles = [company_profile(row, icp) for row in _library_rows(max_rows=10000)]
+    member_ids = {int(k) for k in state.keys()}
+    suggestions = [x for x in library_profiles if int(x.get("id") or 0) not in member_ids and x.get("data_level") != "Researched"]
+    suggestions = [x for x in suggestions if (x.get("source") or {}).get("status") != "Needs better source"]
+    suggestions.sort(key=lambda x: (-int((x.get("icp_prefilter") or {}).get("score") or 0), -int(x.get("completeness") or 0)))
+
+    return {
+        "counts": {
+            "accounts": len(accounts),
+            "contact": len(contact),
+            "monitor": len(monitor),
+            "research_queue": len(queue),
+            "source_issues": len(source_issues),
+        },
+        "accounts": accounts,
+        "contact": contact,
+        "monitor": monitor,
+        "research_queue": queue,
+        "source_issues": source_issues,
+        "suggestions": suggestions[:12],
+    }
+
+
+@app.post("/api/workspace-v2/accounts/{company_id}")
+def api_workspace_add(company_id: int, payload: dict[str, Any]):
+    if not get_company(company_id):
+        raise HTTPException(404, "Company not found")
+    state = str(payload.get("state") or "active")
+    meta = set_workspace_account(company_id, state=state, source="user")
+    return {"ok": True, "company_id": company_id, "workspace_state": meta}
+
+
+@app.delete("/api/workspace-v2/accounts/{company_id}")
+def api_workspace_remove(company_id: int):
+    return {"ok": remove_workspace_account(company_id), "company_id": company_id}
 
 
 @app.get("/api/companies/{company_id}/intelligence")
@@ -115,11 +190,13 @@ _extra_css = "\n".join([
     _read("workspace_loader_v56.css"),
     _read("source_quality_v57.css"),
     _read("data_engine_v60.css"),
+    _read("workspace_v61.css"),
 ])
 _extra_js = "\n".join([
     _read("workspace_loader_v56.js"),
     _read("source_quality_v57.js"),
     _read("data_engine_v60.js"),
+    _read("workspace_v61.js"),
 ])
 
 _core.HTML = _core.HTML.replace("</style>", _extra_css + "\n</style>").replace(
