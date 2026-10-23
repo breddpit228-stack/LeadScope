@@ -25,7 +25,7 @@ from src.seed import EUROPE_DATA_URL, fetch_europe_seed
 from src.service import analyze_company, recalculate_score
 from src.storage import (
     bulk_import_seed, company_count, create_company, dashboard_stats, delete_company,
-    find_company_by_website, get_company, get_icp, init_db, list_activity, list_companies, workspace_overview,
+    find_company_by_website, get_company, get_icp, init_db, list_activity, list_companies,
     list_unresearched, log_activity, seed_demo_activity, set_icp, update_company,
 )
 
@@ -44,6 +44,73 @@ _BATCH: dict[str, Any] = {
     "started_at": None, "message": "", "stop_requested": False,
 }
 _BATCH_LOCK = threading.Lock()
+
+
+def _json_list(value: Any) -> list[Any]:
+    import json
+    if isinstance(value, list):
+        return value
+    try:
+        parsed = json.loads(value or "[]")
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+def _workspace_overview() -> dict[str, Any]:
+    rows = list_companies(limit=2000)
+    total = len(rows)
+    researched = [r for r in rows if str(r.get("quality_status") or "").strip()]
+    recommended = [r for r in researched if int(r.get("research_score") or 0) >= 65 and r.get("human_review_status") != "Rejected"]
+    ready = [r for r in researched if r.get("quality_status") == "Ready for review" and r.get("human_review_status") != "Rejected"]
+    enriched = []
+    strong_signal_count = 0
+    opportunity_count = 0
+    for r in researched:
+        signals = [x for x in _json_list(r.get("commercial_signals_json")) if isinstance(x, dict)]
+        signals.sort(key=lambda x: int(x.get("signal_value") or 0), reverse=True)
+        top_signal = signals[0] if signals else {}
+        strong_signal_count += sum(1 for x in signals if int(x.get("signal_value") or 0) >= 45 and x.get("freshness") in {"current", "recent", "unknown"})
+        hypotheses = [x for x in _json_list(r.get("hypotheses_json")) if isinstance(x, dict)]
+        top_hyp = hypotheses[0] if hypotheses else {}
+        actionable = bool(top_hyp) and int(top_signal.get("signal_value") or 0) >= 25 and int(r.get("research_score") or 0) >= 45
+        if actionable and r.get("human_review_status") != "Rejected":
+            opportunity_count += 1
+        enriched.append({
+            "id": r.get("id"), "company": r.get("company"), "website": r.get("website"),
+            "country": r.get("country"), "city": r.get("city"), "segment": r.get("segment"),
+            "company_summary": r.get("company_summary"), "research_score": int(r.get("research_score") or 0),
+            "research_priority": r.get("research_priority"), "quality_status": r.get("quality_status"),
+            "human_review_status": r.get("human_review_status"), "top_signal": top_signal,
+            "top_hypothesis": top_hyp, "suggested_angle": r.get("suggested_angle"),
+            "updated_at": r.get("updated_at"), "actionable": actionable,
+        })
+    focus = sorted(
+        [x for x in enriched if x["human_review_status"] != "Rejected"],
+        key=lambda x: (1 if x["actionable"] else 0, int((x.get("top_signal") or {}).get("signal_value") or 0), int(x.get("research_score") or 0)),
+        reverse=True,
+    )[:6]
+    opportunities = sorted(
+        [x for x in enriched if x["actionable"] and x["human_review_status"] != "Rejected"],
+        key=lambda x: (int((x.get("top_signal") or {}).get("signal_value") or 0), int(x.get("research_score") or 0)), reverse=True
+    )[:12]
+    starters = [
+        {
+            "id": r.get("id"), "company": r.get("company"), "website": r.get("website"),
+            "country": r.get("country"), "city": r.get("city"), "segment": r.get("segment"),
+            "description": r.get("public_signals") or r.get("segment") or "Public company profile",
+            "seed_tags_json": r.get("seed_tags_json") or "[]",
+        }
+        for r in rows
+        if not str(r.get("quality_status") or "").strip()
+        and (str(r.get("public_signals") or "").strip() or str(r.get("segment") or "").strip())
+    ][:6]
+    return {
+        "total": total, "researched": len(researched), "needs_research": total-len(researched),
+        "recommended": len(recommended), "ready": len(ready), "strong_signals": strong_signal_count,
+        "opportunities": opportunity_count, "coverage_percent": round((len(researched)/total*100),1) if total else 0,
+        "focus_accounts": focus, "opportunity_accounts": opportunities, "starter_accounts": starters,
+    }
 
 
 def _job_set(job_id: str, **changes: Any) -> None:
@@ -190,7 +257,7 @@ def api_stats():
 
 @app.get("/api/workspace")
 def api_workspace():
-    return workspace_overview()
+    return _workspace_overview()
 
 
 @app.get("/api/companies")
@@ -356,4 +423,7 @@ def api_export():
     return StreamingResponse(iter([content]), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=leadscope_export.csv"})
 
 
-HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+_BASE_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+_WORKSPACE_CSS = (ROOT / "static" / "workspace_v55.css").read_text(encoding="utf-8") if (ROOT / "static" / "workspace_v55.css").exists() else ""
+_WORKSPACE_JS = (ROOT / "static" / "workspace_v55.js").read_text(encoding="utf-8") if (ROOT / "static" / "workspace_v55.js").exists() else ""
+HTML = _BASE_HTML.replace("</style>", _WORKSPACE_CSS + "\n</style>").replace("</body>", f"<script>{_WORKSPACE_JS}</script>\n</body>")
