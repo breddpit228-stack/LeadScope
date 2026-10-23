@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
+import time
 
 from fastapi import HTTPException
 
 import app_core as _core
 from app_core import *  # noqa: F401,F403
 from src.data_engine import company_profile, summarize_library
-from src.storage import get_company, get_icp, list_companies
+from src.library_sources import fetch_wikidata_europe_companies
+from src.storage import bulk_import_seed, company_count, get_company, get_icp, list_companies
 
 ROOT = Path(__file__).resolve().parent
 app = _core.app
@@ -17,6 +20,54 @@ app.version = "6.0"
 def _read(name: str) -> str:
     path = ROOT / name
     return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+_LIBRARY_EXPAND = {"status": "idle", "target": 10000, "added": 0, "checked": 0, "message": ""}
+_LIBRARY_EXPAND_LOCK = threading.Lock()
+
+
+def _library_expand_worker(target: int = 10000) -> None:
+    target = max(1000, min(int(target), 10000))
+    with _LIBRARY_EXPAND_LOCK:
+        _LIBRARY_EXPAND.update(status="running", target=target, added=0, checked=0, message="Indexing public European companies…")
+    offset = 0
+    batch_size = 250
+    total_added = 0
+    try:
+        while company_count() < target and offset < 30000:
+            items = fetch_wikidata_europe_companies(limit=batch_size, offset=offset)
+            if not items:
+                break
+            result = bulk_import_seed(
+                items,
+                limit=max(0, target - company_count()),
+                source_name="Wikidata · European businesses with official websites",
+            )
+            total_added += int(result.get("added") or 0)
+            offset += batch_size
+            with _LIBRARY_EXPAND_LOCK:
+                _LIBRARY_EXPAND.update(added=total_added, checked=offset, message=f"{company_count()} companies indexed · checking public source batch {offset // batch_size}")
+            time.sleep(0.8)
+        with _LIBRARY_EXPAND_LOCK:
+            _LIBRARY_EXPAND.update(status="done", added=total_added, checked=offset, message=f"Library now contains {company_count()} companies")
+    except Exception as exc:
+        with _LIBRARY_EXPAND_LOCK:
+            _LIBRARY_EXPAND.update(status="error", added=total_added, checked=offset, message=f"Library expansion paused: {type(exc).__name__}: {str(exc)[:240]}")
+
+
+@app.post("/api/library/expand")
+def api_library_expand(target: int = 10000):
+    with _LIBRARY_EXPAND_LOCK:
+        if _LIBRARY_EXPAND.get("status") == "running":
+            return dict(_LIBRARY_EXPAND)
+    threading.Thread(target=_library_expand_worker, args=(target,), daemon=True, name="library-expand").start()
+    return {"status": "starting", "target": max(1000, min(int(target), 10000))}
+
+
+@app.get("/api/library/expand/status")
+def api_library_expand_status():
+    with _LIBRARY_EXPAND_LOCK:
+        return dict(_LIBRARY_EXPAND) | {"company_count": company_count()}
 
 
 @app.get("/api/library")
