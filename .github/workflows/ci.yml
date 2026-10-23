@@ -1,0 +1,40 @@
+name: LeadScope CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Compile Python
+        run: |
+          python -m py_compile app.py app_core.py
+          python -m py_compile src/*.py
+
+      - name: Run backend tests
+        run: python run_tests.py
+
+      - name: Check JavaScript syntax
+        run: |
+          node --check static/workspace_v55.js
+          node --check workspace_loader_v56.js
+          node --check source_quality_v57.js
+          node --check data_engine_v60.js
+          node --check workspace_v61.js
+          node --check changes_v62.js
