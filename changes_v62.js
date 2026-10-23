@@ -17,6 +17,18 @@ function renderChangeExtension(){
 }
 const previousOpen=window.openCompany;window.openCompany=async function(id){let intel=fetch('/api/companies/'+id+'/intelligence').then(r=>r.json()).catch(()=>null);let out=await previousOpen(id);changeIntel=await intel;renderChangeExtension();return out}
 const previousRender=window.renderReport;if(previousRender)window.renderReport=function(){let out=previousRender();setTimeout(renderChangeExtension,0);return out}
-function addTodayChanges(){let stats=document.querySelector('#todayV2Stats');if(!stats||stats.querySelector('[data-change-stat]'))return;fetch('/api/workspace-v2').then(r=>r.json()).then(w=>{let count=(w.counts||{}).changes||0;if(!count)return;stats.insertAdjacentHTML('beforeend',`<div class="workspaceV2Stat" data-change-stat onclick="showWorkspace('accounts')"><span>New changes</span><b>${count}</b><p>Detected since previous research</p></div>`)}).catch(()=>{})}
-const obs=new MutationObserver(()=>addTodayChanges());obs.observe(document.body,{subtree:true,childList:true});setTimeout(addTodayChanges,0);
+let todayChangeRequest=null;
+function addTodayChanges(){
+ let stats=document.querySelector('#todayV2Stats');
+ if(!stats||stats.querySelector('[data-change-stat]')||todayChangeRequest)return;
+ todayChangeRequest=fetch('/api/workspace-v2').then(r=>r.json()).then(w=>{
+   let count=(w.counts||{}).changes||0;
+   let current=document.querySelector('#todayV2Stats');
+   if(count&&current&&!current.querySelector('[data-change-stat]'))current.insertAdjacentHTML('beforeend',`<div class="workspaceV2Stat" data-change-stat onclick="showWorkspace('accounts')"><span>New changes</span><b>${count}</b><p>Detected since previous research</p></div>`);
+ }).catch(()=>{}).finally(()=>{todayChangeRequest=null});
+}
+function scheduleTodayChanges(){[150,700,1600].forEach(ms=>setTimeout(addTodayChanges,ms))}
+const previousShow=window.showWorkspace;
+if(previousShow)window.showWorkspace=function(view){let out=previousShow(view);let normalized=view==='overview'?'today':view;if(normalized==='today')scheduleTodayChanges();return out}
+setTimeout(scheduleTodayChanges,300);
 })();
