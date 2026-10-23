@@ -26,7 +26,7 @@ from src.workspace_state import ensure_workspace_initialized, remove_workspace_a
 
 ROOT = Path(__file__).resolve().parent
 app = _core.app
-app.version = "6.3.1"
+app.version = "6.4"
 
 
 def _read(name: str) -> str:
@@ -298,6 +298,7 @@ _extra_js = "\n".join([
     _read("workspace_v61.js"),
     _read("changes_v62.js"),
     _read("identity_v63.js"),
+    _read("performance_v64.js"),
 ])
 
 _core.HTML = _core.HTML.replace("</style>", _extra_css + "\n</style>").replace(
