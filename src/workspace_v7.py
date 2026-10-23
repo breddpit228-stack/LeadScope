@@ -8,6 +8,16 @@ from .data_engine_ext import company_profile as full_company_profile
 from .storage import get_company, get_icp, list_companies
 from .workspace_projects import get_workspace, list_workspaces
 
+EUROPE_COUNTRIES = {
+    "albania", "andorra", "austria", "belarus", "belgium", "bosnia and herzegovina", "bulgaria",
+    "croatia", "cyprus", "czech republic", "czechia", "denmark", "estonia", "finland", "france",
+    "germany", "greece", "hungary", "iceland", "ireland", "italy", "kosovo", "latvia",
+    "liechtenstein", "lithuania", "luxembourg", "malta", "moldova", "monaco", "montenegro",
+    "netherlands", "north macedonia", "norway", "poland", "portugal", "romania", "san marino",
+    "serbia", "slovakia", "slovenia", "spain", "sweden", "switzerland", "ukraine",
+    "united kingdom", "uk", "vatican city",
+}
+
 
 def _parts(value: str) -> list[str]:
     return [x.strip().lower() for x in re.split(r"[,;/|]+", str(value or "")) if x.strip()]
@@ -15,6 +25,16 @@ def _parts(value: str) -> list[str]:
 
 def _words(value: str) -> list[str]:
     return [x.lower() for x in re.findall(r"[A-Za-z0-9À-ž+.-]{2,}", str(value or ""))]
+
+
+def _region_hit(region: str, profile: dict[str, Any]) -> bool:
+    region = region.strip().lower()
+    country = str(profile.get("country") or "").strip().lower()
+    city = str(profile.get("city") or "").strip().lower()
+    location = f"{country} {city}".strip()
+    if region in {"europe", "eu", "european union"}:
+        return country in EUROPE_COUNTRIES
+    return region in location or any(w in location for w in _words(region) if len(w) >= 3)
 
 
 def profile_match(profile: dict[str, Any], workspace: dict[str, Any]) -> dict[str, Any]:
@@ -43,8 +63,7 @@ def profile_match(profile: dict[str, Any], workspace: dict[str, Any]) -> dict[st
     regions = _parts(workspace.get("region") or "")
     if regions:
         possible += 25
-        location = f"{profile.get('country','')} {profile.get('city','')}".lower()
-        hits = [x for x in regions if x in location or any(w in location for w in _words(x) if len(w) >= 3)]
+        hits = [x for x in regions if _region_hit(x, profile)]
         if hits:
             earned += 25
             matched.append(f"Location · {hits[0]}")
@@ -75,11 +94,16 @@ def profile_match(profile: dict[str, Any], workspace: dict[str, Any]) -> dict[st
 
 def _workspace_decision(profile: dict[str, Any], match: dict[str, Any]) -> dict[str, Any]:
     base = dict(profile.get("decision") or {})
+    source = profile.get("source") or {}
+    if str(source.get("status") or "") in {"Needs better source", "Limited"} or base.get("decision") == "SOURCE NEEDED":
+        return {
+            "decision": "SOURCE NEEDED", "fit": None, "timing": None,
+            "confidence": 25, "priority": None,
+            "reason": source.get("reason") or "A stronger corporate source is needed before this workspace can score the account.",
+        }
     if profile.get("data_level") != "Researched":
         return {"decision": "RESEARCH", "fit": None, "timing": None, "confidence": None, "priority": None,
                 "reason": "Select and research this company before making a sales decision."}
-    if base.get("decision") == "SOURCE NEEDED":
-        return base
 
     fit = int(match.get("score") or 0)
     timing = int(base.get("timing") or 20)
@@ -117,7 +141,7 @@ def _candidate_rows(workspace: dict[str, Any], q: str = "", scan_limit: int = 90
         queries.append(industries[0])
     if keywords:
         queries.append(keywords[0])
-    if regions:
+    if regions and regions[0] not in {"europe", "eu", "european union"}:
         queries.append(regions[0])
 
     for query in queries[:3]:
@@ -178,12 +202,12 @@ def workspace_detail(workspace_id: str) -> dict[str, Any] | None:
     if not workspace:
         return None
     selected = selected_profiles(workspace)
-    researched = [x for x in selected if x.get("data_level") == "Researched"]
+    waiting = [x for x in selected if x.get("data_level") != "Researched" or (x.get("decision") or {}).get("decision") == "SOURCE NEEDED"]
+    researched = [x for x in selected if x.get("data_level") == "Researched" and (x.get("decision") or {}).get("decision") != "SOURCE NEEDED"]
     recommended = [x for x in researched if (x.get("decision") or {}).get("decision") == "CONTACT"]
     monitor = [x for x in researched if (x.get("decision") or {}).get("decision") == "MONITOR"]
     skipped = [x for x in researched if (x.get("decision") or {}).get("decision") == "SKIP"]
     review = [x for x in researched if (x.get("decision") or {}).get("decision") not in {"CONTACT", "MONITOR", "SKIP"}]
-    waiting = [x for x in selected if x.get("data_level") != "Researched"]
     return {
         "workspace": workspace,
         "counts": {
