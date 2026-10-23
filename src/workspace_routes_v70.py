@@ -37,6 +37,14 @@ def register_workspace_routes(app, core) -> None:
     def workspace_v70_css():
         return Response((ROOT / "workspace_v70.css").read_text(encoding="utf-8"), media_type="text/css")
 
+    @app.get("/assets/workspace-v71.js")
+    def workspace_v71_js():
+        return Response((ROOT / "workspace_autocomplete_v71.js").read_text(encoding="utf-8"), media_type="application/javascript")
+
+    @app.get("/assets/workspace-v71.css")
+    def workspace_v71_css():
+        return Response((ROOT / "workspace_autocomplete_v71.css").read_text(encoding="utf-8"), media_type="text/css")
+
     @app.get("/api/workspaces")
     def api_workspaces():
         return {"items": workspace_index()}
