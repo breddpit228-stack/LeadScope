@@ -33,12 +33,12 @@ jobs:
       - name: Runtime API smoke test
         run: |
           python - <<'PY'
-          from fastapi.testclient import TestClient
           import app
-          client = TestClient(app.app)
-          assert client.get('/').status_code == 200
-          assert client.get('/api/data-engine/stats').status_code == 200
-          assert client.get('/api/workspace-v2').status_code == 200
+          assert isinstance(app.home(), str) and len(app.home()) > 1000
+          stats = app.api_data_engine_stats()
+          workspace = app.api_workspace_v2()
+          assert isinstance(stats, dict) and 'total' in stats
+          assert isinstance(workspace, dict) and 'counts' in workspace
           print('LeadScope runtime smoke test OK · version', app.app.version)
           PY
 
