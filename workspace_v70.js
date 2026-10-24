@@ -34,6 +34,8 @@ function v7Criteria(w){
 function v7Meta(p){return [p.company_type,p.country,p.audience].filter(Boolean).join(' · ')}
 function v7Empty(title,text,button=''){return `<div class="v7EmptyInline"><h3>${v7Escape(title)}</h3><p>${v7Escape(text)}</p>${button}</div>`}
 function v7SetBusy(button,busy,label){if(!button)return;button.disabled=busy;if(label)button.textContent=label}
+function v7StopResearchPoll(){clearTimeout(v7ResearchPoll);v7ResearchPoll=null}
+function v7ScheduleResearchPoll(delay=1600){if(v7ResearchPoll||v7ActiveTab!=='shortlist')return;v7ResearchPoll=setTimeout(v7PollResearch,delay)}
 
 function v7Install(){
   const view=document.querySelector('#workspaceView'),side=view?.querySelector('.side'),main=view?.querySelector('.main');
@@ -89,7 +91,7 @@ async function v7LoadWorkspaceNav(){
   nav.innerHTML=v7Workspaces.map(w=>`<button class="${v7ActiveWorkspace===w.id?'active':''}" onclick="openV7Workspace('${w.id}','discover')"><span>${v7Escape(w.name)}</span><small class="v7NavCount">${(w.counts||{}).selected||0}</small></button>`).join('');
 }
 async function v7ShowHub(){
-  clearTimeout(v7ResearchPoll);v7ResearchPoll=null;v7ActiveWorkspace=null;v7Detail=null;v7MatchCount=null;
+  v7StopResearchPoll();v7ActiveWorkspace=null;v7Detail=null;v7MatchCount=null;
   document.querySelector('#homeView')?.classList.add('hidden');document.querySelector('#workspaceView')?.classList.remove('hidden');v7HideLegacy();
   document.querySelector('#reportPage')?.classList.add('hidden');document.querySelector('#v7ProjectPage')?.classList.add('hidden');document.querySelector('#v7HubPage')?.classList.remove('hidden');
   document.querySelector('#v7AllWorkspaces')?.classList.add('active');
@@ -107,15 +109,24 @@ function v7RenderWorkspaceShell(){
 }
 window.openV7Workspace=async function(id,tab='discover'){
   v7ActiveWorkspace=id;v7ActiveTab=(tab==='selected'||tab==='research')?'shortlist':tab;v7MatchCount=null;
+  if(v7ActiveTab!=='shortlist')v7StopResearchPoll();
   document.querySelector('#homeView')?.classList.add('hidden');document.querySelector('#workspaceView')?.classList.remove('hidden');v7HideLegacy();document.querySelector('#reportPage')?.classList.add('hidden');document.querySelector('#v7HubPage')?.classList.add('hidden');document.querySelector('#v7ProjectPage')?.classList.remove('hidden');document.querySelector('#v7AllWorkspaces')?.classList.remove('active');
   await v7FetchDetail();await v7LoadWorkspaceNav();v7RenderWorkspaceShell();await v7RenderTab();window.scrollTo({top:0,behavior:'smooth'});
 }
-window.setV7WorkspaceTab=async function(tab){v7ActiveTab=(tab==='selected'||tab==='research')?'shortlist':tab;await v7RenderTab()}
+window.setV7WorkspaceTab=async function(tab){
+  v7ActiveTab=(tab==='selected'||tab==='research')?'shortlist':tab;
+  if(v7ActiveTab!=='shortlist')v7StopResearchPoll();
+  await v7RenderTab();
+}
 async function v7RenderTab(){
   if(!v7ActiveWorkspace)return;
   if(v7ActiveTab==='discover')return v7RenderDiscover();
   await v7FetchDetail();v7RenderWorkspaceShell();
-  if(v7ActiveTab==='shortlist')return v7RenderShortlist();
+  if(v7ActiveTab==='shortlist'){
+    v7RenderShortlist();
+    if(v7Detail?.research_batch?.status==='running')v7ScheduleResearchPoll();
+    return;
+  }
   if(v7ActiveTab==='results')return v7RenderResults();
 }
 
@@ -157,20 +168,19 @@ function v7RenderShortlist(statusOverride=null){
   const running=batch.status==='running',total=Number(batch.total||0),processed=Number(batch.done||0)+Number(batch.failed||0),pct=total?Math.round(processed/total*100):0;
   const progress=(running||batch.status==='done')?`<div class="v7ResearchBanner"><div class="v7ResearchBannerTop"><div><h3>${running?'Research running':'Last research run finished'}</h3><p>${running?`${v7Escape(batch.current||'Preparing next company')} · ${batch.done||0} complete · ${batch.failed||0} failed`:`${batch.done||0} completed · ${batch.failed||0} failed`}</p></div><strong>${running?pct+'%':''}</strong></div>${running?`<div class="v7BatchTrack"><i style="width:${pct}%"></i></div>`:''}${(batch.errors||[]).length?`<div class="v7BatchErrors">${(batch.errors||[]).slice(-3).map(x=>`${v7Escape(x.company||'Company')}: ${v7Escape(x.error||'Research failed')}`).join('<br>')}</div>`:''}</div>`:'';
   body.innerHTML=`<div class="v7SectionHead"><div><h2>Shortlist</h2><p>One place for selection and research. Companies move from Ready → Researching → Completed without a separate queue screen.</p></div><div>${ready.length&&!running?`<button class="primary" onclick="startV7Research()">Research all ready · ${ready.length}</button>`:''}</div></div><div class="v7SelectionBar"><div><strong>${selected.length} shortlisted</strong><span>${ready.length} ready · ${completed.length} completed · ${issues.length} source issues</span></div><button class="secondary small" onclick="setV7WorkspaceTab('discover')">+ Add companies</button></div>${progress}`+(selected.length?v7ShortlistGroup('Ready to research',ready,batch,'These accounts will use deep research when you start the queue.')+v7ShortlistGroup('Completed',completed,batch,'Workspace-specific Fit and outreach are ready.')+v7ShortlistGroup('Source issues',issues,batch,'A better corporate source is required before research can continue.'):v7Empty('Your shortlist is empty','Choose promising companies from Discover first.','<button class="primary" onclick="setV7WorkspaceTab(\'discover\')">Discover companies</button>'));
-  if(running&&!v7ResearchPoll)v7PollResearch();
 }
 window.removeV7Shortlist=async function(companyId){await v7Api(`/api/workspaces/${v7ActiveWorkspace}/selected/${companyId}`,{method:'DELETE'});await v7FetchDetail();await v7LoadWorkspaceNav();v7RenderWorkspaceShell();v7RenderShortlist()}
 window.startV7Research=async function(){
-  const result=await v7Api(`/api/workspaces/${v7ActiveWorkspace}/research`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});v7ActiveTab='shortlist';await v7FetchDetail();v7RenderWorkspaceShell();v7RenderShortlist(result);if(result.status==='running')v7PollResearch();
+  const result=await v7Api(`/api/workspaces/${v7ActiveWorkspace}/research`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});v7ActiveTab='shortlist';await v7FetchDetail();v7RenderWorkspaceShell();v7RenderShortlist(result);if(result.status==='running')v7ScheduleResearchPoll();
 }
 async function v7PollResearch(){
-  clearTimeout(v7ResearchPoll);v7ResearchPoll=null;if(!v7ActiveWorkspace)return;
+  v7ResearchPoll=null;if(!v7ActiveWorkspace||v7ActiveTab!=='shortlist')return;
   try{
     const status=await v7Api(`/api/workspaces/${v7ActiveWorkspace}/research/status`);
     if(v7ActiveTab==='shortlist')v7RenderShortlist(status);
-    if(status.status==='running')v7ResearchPoll=setTimeout(v7PollResearch,1600);
+    if(status.status==='running')v7ScheduleResearchPoll();
     else{await v7FetchDetail();if(v7ActiveTab==='shortlist'){v7RenderWorkspaceShell();v7RenderShortlist(status)}await v7LoadWorkspaceNav()}
-  }catch(e){v7ResearchPoll=setTimeout(v7PollResearch,2500)}
+  }catch(e){v7ScheduleResearchPoll(2500)}
 }
 
 function v7ResultRow(p){let d=p.decision||{},m=p.profile_match||{};return `<article class="v7ResultRow"><div><div class="v7CompanyName notranslate" translate="no">${v7Escape(p.company)}</div><div class="v7CompanyMeta">${v7Escape(v7Meta(p))}</div><span class="v7Decision ${v7DecisionClass(d.decision)}">${v7Escape(d.decision||'REVIEW')}</span></div><div class="v7ResultMetric"><span>Fit</span><b>${d.fit==null?'—':d.fit}</b></div><div class="v7ResultMetric"><span>Timing</span><b>${d.timing==null?'—':d.timing}</b></div><div class="v7ResultMetric"><span>Confidence</span><b>${d.confidence==null?'—':d.confidence}</b></div><div class="v7ResultMetric"><span>Priority</span><b>${d.priority==null?'—':d.priority}</b></div><div class="v7Why">${v7Escape(d.reason||m.label||'Review current evidence.')}</div><button class="secondary small" onclick="openV7Report(${p.id})">Open</button></article>`}
