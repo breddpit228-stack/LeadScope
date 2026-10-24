@@ -110,10 +110,21 @@ window.researchAndAddToWorkspace=function(id){
 /* Workspace v7 is intentionally loaded last, after all legacy compatibility layers. */
 (function(){
   if(document.querySelector('script[data-leadscope-workspace-v7]'))return;
+  const css=document.createElement('link');
+  css.rel='stylesheet';css.href='/assets/workspace-v70.css?v=7.3';document.head.appendChild(css);
+  const contextCss=document.createElement('link');
+  contextCss.rel='stylesheet';contextCss.href='/assets/workspace-v73.css?v=7.3';document.head.appendChild(contextCss);
   const script=document.createElement('script');
-  script.src='/assets/workspace-v70.js?v=7.0';
+  script.src='/assets/workspace-v70.js?v=7.3';
   script.async=false;
   script.dataset.leadscopeWorkspaceV7='1';
   script.onerror=()=>console.error('LeadScope Workspace v7 UI failed to load.');
+  script.onload=()=>{
+    const context=document.createElement('script');
+    context.src='/assets/workspace-v73.js?v=7.3';
+    context.async=false;
+    context.onerror=()=>console.error('LeadScope Workspace v7.3 context layer failed to load.');
+    document.body.appendChild(context);
+  };
   document.body.appendChild(script);
 })();
