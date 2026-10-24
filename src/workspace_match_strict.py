@@ -68,8 +68,16 @@ def _infer_audience(profile: dict[str, Any]) -> tuple[str, str]:
     return "Unknown", "Business model is not verified from the basic public profile."
 
 
-def _requirement(key: str, label: str, status: str, value: str, target: str, reason: str) -> dict[str, str]:
-    return {"key": key, "label": label, "status": status, "value": value, "target": target, "reason": reason}
+def _requirement(key: str, label: str, status: str, value: str, target: str, reason: str, role: str) -> dict[str, str]:
+    return {
+        "key": key,
+        "label": label,
+        "status": status,
+        "value": value,
+        "target": target,
+        "reason": reason,
+        "role": role,
+    }
 
 
 def apply_strict_match(
@@ -78,11 +86,11 @@ def apply_strict_match(
     workspace: dict[str, Any],
     row: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Turn an arithmetic profile score into an evidence-aware Discover decision.
+    """Make Discover evidence-aware without confusing missing data with a mismatch.
 
-    The original matcher still supplies weighted scoring and industry relationship evidence.
-    This layer prevents unknown, contradictory, or taxonomy-only criteria from appearing as
-    a 'Strong match'. It never invents missing company facts.
+    Industry and geography are the core retrieval criteria. Audience and company size are
+    supporting criteria: verified contradictions demote the account, but unknown public
+    data only lowers confidence and remains visible as `?` in the UI.
     """
     out = dict(base or {})
     raw_score = max(0, min(100, int(out.get("score") or 0)))
@@ -95,9 +103,7 @@ def apply_strict_match(
     if industry:
         kind = str(relation.get("kind") or "none")
         industry_points = int(out.get("industry_points") or 0)
-        # The base matcher uses 36/40 for a taxonomy/seed-tag hit with no confirming
-        # industry phrase in the description. That is useful retrieval evidence, but it
-        # is not strong enough to call the company a verified primary-industry match.
+        # A taxonomy-only 36/40 hit is useful for retrieval, but does not prove primary industry.
         taxonomy_only = kind == "primary" and industry_points == 36
         if kind == "primary" and industry_points >= 30 and not taxonomy_only:
             status = "match"
@@ -114,7 +120,7 @@ def apply_strict_match(
         requirements.append(_requirement(
             "industry", "Industry", status,
             str(relation.get("label") or "Not verified"), industry,
-            industry_reason,
+            industry_reason, "core",
         ))
 
     region = str(workspace.get("region") or "").strip()
@@ -130,7 +136,7 @@ def apply_strict_match(
         else:
             status = "mismatch"
             reason = f"Verified location ({country}) does not match {region}."
-        requirements.append(_requirement("location", "Location", status, country or "Unknown", region, reason))
+        requirements.append(_requirement("location", "Location", status, country or "Unknown", region, reason, "core"))
 
     audience_target = str(workspace.get("audience") or "Any").strip()
     if audience_target and audience_target.lower() != "any":
@@ -145,7 +151,7 @@ def apply_strict_match(
             status = "mismatch"
         requirements.append(_requirement(
             "audience", "Business model", status, audience_value, audience_target,
-            audience_reason,
+            audience_reason, "supporting",
         ))
         profile["audience"] = audience_value
 
@@ -168,41 +174,57 @@ def apply_strict_match(
         else:
             status = "mismatch"
             reason = f"Verified size ({actual_text}) does not match {size_target}."
-        requirements.append(_requirement("size", "Company size", status, actual_text or "Unknown", size_target, reason))
+        requirements.append(_requirement("size", "Company size", status, actual_text or "Unknown", size_target, reason, "supporting"))
 
+    core = [r for r in requirements if r["role"] == "core"]
+    supporting = [r for r in requirements if r["role"] == "supporting"]
     statuses = [r["status"] for r in requirements]
-    mismatches = sum(1 for x in statuses if x == "mismatch")
     unknowns = sum(1 for x in statuses if x == "unknown")
     partials = sum(1 for x in statuses if x == "partial")
+    mismatches = sum(1 for x in statuses if x == "mismatch")
+    supporting_unknowns = sum(1 for r in supporting if r["status"] == "unknown")
+    supporting_mismatches = sum(1 for r in supporting if r["status"] == "mismatch")
+    supporting_partials = sum(1 for r in supporting if r["status"] == "partial")
 
     score = raw_score
-    industry_status = next((r["status"] for r in requirements if r["key"] == "industry"), "match")
+    industry_status = next((r["status"] for r in core if r["key"] == "industry"), "match")
+    location_status = next((r["status"] for r in core if r["key"] == "location"), "match")
+
+    # Core evidence determines whether the account belongs in the target market at all.
     if industry_status == "mismatch":
         score = min(score, 39)
     elif industry_status == "partial":
         score = min(score, 59)
-    if mismatches:
-        score = min(score, 49)
-    if unknowns >= 2:
+    if location_status == "mismatch":
+        score = min(score, 39)
+    elif location_status == "unknown":
         score = min(score, 59)
-    elif unknowns == 1:
-        score = min(score, 69)
-    if partials and not mismatches and not unknowns:
+
+    # Supporting criteria refine fit. Unknown is not a contradiction; verified mismatch is.
+    if supporting_mismatches:
+        score = min(score, 49)
+    elif supporting_partials:
         score = min(score, 79)
+    elif supporting_unknowns >= 2:
+        score = min(score, 79)
+    elif supporting_unknowns == 1:
+        score = min(score, 84)
 
-    all_required_match = bool(requirements) and all(r["status"] == "match" for r in requirements)
-    if not requirements:
-        all_required_match = True
-    best = all_required_match and score >= 60 and (not industry or industry_status == "match")
+    core_complete = bool(core) and all(r["status"] == "match" for r in core)
+    if not core:
+        core_complete = True
+    best = core_complete and supporting_mismatches == 0 and score >= 60 and (not industry or industry_status == "match")
 
-    if best and score >= 88:
+    if best and supporting_unknowns:
+        label = "Strong candidate · some data unverified" if score >= 74 else "Good candidate · some data unverified"
+    elif best and score >= 88:
         label = "Excellent profile match"
     elif best and score >= 74:
         label = "Strong profile match"
     elif best:
         label = "Good profile match"
-    elif unknowns:
-        label = "Promising but incomplete"
+    elif any(r["status"] == "unknown" for r in core):
+        label = "Promising but core data is incomplete"
     elif partials:
         label = "Broader profile match"
     elif mismatches:
@@ -224,10 +246,14 @@ def apply_strict_match(
         "tier": "best" if best else "broader",
         "requirements": requirements,
         "requirement_summary": requirement_summary,
-        "required_complete": all_required_match,
+        "required_complete": core_complete,
+        "core_complete": core_complete,
+        "supporting_complete": all(r["status"] == "match" for r in supporting) if supporting else True,
         "unknown_required": unknowns,
         "mismatched_required": mismatches,
         "partial_required": partials,
+        "supporting_unknown": supporting_unknowns,
+        "supporting_mismatch": supporting_mismatches,
         "matched": (requirement_summary + keyword_summary)[:5],
         "gaps": gaps[:8],
     })
