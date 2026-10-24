@@ -35,9 +35,11 @@ def main():
         'country': 'Poland', 'city': 'Warsaw', 'team_size_public': '',
     }
     r = apply_strict_match(base(score=90, industry_points=40), unknown_size_profile, WORKSPACE, {})
-    assert r['tier'] == 'broader', r
-    assert r['score'] <= 69, r
-    assert r['label'] == 'Promising but incomplete', r
+    assert r['tier'] == 'best', r
+    assert 74 <= r['score'] <= 84, r
+    assert 'unverified' in r['label'].lower(), r
+    assert r['core_complete'] is True, r
+    assert r['supporting_complete'] is False, r
     assert any(x['key'] == 'size' and x['status'] == 'unknown' for x in r['requirements']), r
     assert 'Company size ?' in r['matched'], r
 
@@ -52,6 +54,16 @@ def main():
     assert any(x['key'] == 'audience' and x['status'] == 'mismatch' and x['value'] == 'B2C' for x in r['requirements']), r
     assert 'Business model ×' in r['matched'], r
 
+    wrong_size = {
+        'description': 'B2B payments software for companies and finance teams.',
+        'company_type': 'Fintech', 'category': 'Fintech', 'audience': 'B2B',
+        'country': 'Poland', 'city': 'Warsaw', 'team_size_public': '20',
+    }
+    r = apply_strict_match(base(score=90, industry_points=40), wrong_size, WORKSPACE, {'team_size_public': '20'})
+    assert r['tier'] == 'broader', r
+    assert r['score'] <= 49, r
+    assert any(x['key'] == 'size' and x['status'] == 'mismatch' for x in r['requirements']), r
+
     strong = {
         'description': 'B2B payments and accounting software for companies and finance teams.',
         'company_type': 'Fintech', 'category': 'Fintech', 'audience': 'B2B',
@@ -61,6 +73,7 @@ def main():
     assert r['tier'] == 'best', r
     assert r['score'] == 90, r
     assert r['required_complete'] is True, r
+    assert r['supporting_complete'] is True, r
     assert all(x['status'] == 'match' for x in r['requirements']), r
 
     service = {
@@ -73,8 +86,6 @@ def main():
     assert r['score'] <= 59, r
     assert any(x['key'] == 'industry' and x['status'] == 'partial' for x in r['requirements']), r
 
-    # A stale/seed taxonomy label alone must not make an unrelated company a strong
-    # Fintech match. 36/40 is the base matcher's taxonomy-only primary score.
     stale_taxonomy = {
         'description': 'Satellite radar intelligence for infrastructure monitoring and decision makers.',
         'company_type': 'Technology / company', 'category': 'Fintech', 'audience': 'B2B',
