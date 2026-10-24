@@ -14,7 +14,6 @@ let activeCompanyId=null;
 let activeWorkspaceId=null;
 let discoverPage=1;
 let discoverQuery='';
-let universeStats=null;
 
 function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
@@ -35,7 +34,7 @@ function replaceInputWithSelect(id,values,placeholder){
   const select=document.createElement('select');
   select.id=id;select.className=el.className||'';
   const opts=[`<option value="">${esc(placeholder)}</option>`];
-  if(current && !values.includes(current))opts.push(`<option value="${esc(current)}">${esc(current)}</option>`);
+  if(current&&!values.includes(current))opts.push(`<option value="${esc(current)}">${esc(current)}</option>`);
   values.forEach(v=>opts.push(`<option value="${esc(v)}">${esc(v)}</option>`));
   select.innerHTML=opts.join('');select.value=current;
   el.replaceWith(select);return select;
@@ -55,9 +54,10 @@ async function fetchContext(workspaceId,companyId){
   return await r.json();
 }
 async function getUniverseStats(){
-  if(universeStats)return universeStats;
-  try{const r=await fetch('/api/company-universe/stats');if(r.ok)universeStats=await r.json()}catch(e){}
-  return universeStats||{};
+  try{const r=await fetch('/api/company-universe/stats');return r.ok?await r.json():{}}catch(e){return {}}
+}
+async function getExpansionStatus(){
+  try{const r=await fetch('/api/library/expand/status');return r.ok?await r.json():{}}catch(e){return {}}
 }
 
 function metricRows(items){
@@ -70,23 +70,20 @@ function applyContext(){
   if(metrics){
     const first=metrics.querySelector('.reportMetric');
     if(first){
-      const label=first.querySelector('.label'),num=first.querySelector('b'),p=first.querySelector('p');
+      const label=first.querySelector('.label'),num=first.querySelector('b'),p=first.querySelector('p'),suffix=first.querySelector('span');
       if(label)label.textContent='Workspace fit';
       if(num)num.textContent=decision.fit==null?'—':String(decision.fit);
-      const suffix=first.querySelector('span');if(suffix)suffix.textContent=decision.fit==null?'':'/100';
-      if(p)p.textContent=intel.fit_summary||`Fit to workspace '${workspace.name||'targeting'}'.`;
+      if(suffix)suffix.textContent=decision.fit==null?'':'/100';
+      if(p)p.textContent=intel.fit_summary||`Workspace-specific fit for ${workspace.name||'this project'} will appear after research.`;
     }
   }
   const meta=document.querySelector('#reportHeader .reportMeta');
-  if(meta && !meta.querySelector('.v73WorkspaceBadge'))meta.insertAdjacentHTML('beforeend',`<span class="badge neutral v73WorkspaceBadge">Workspace · ${esc(workspace.name||'')}</span>`);
+  if(meta&&!meta.querySelector('.v73WorkspaceBadge'))meta.insertAdjacentHTML('beforeend',`<span class="badge neutral v73WorkspaceBadge">Workspace · ${esc(workspace.name||'')}</span>`);
 
-  const briefTitle=[...document.querySelectorAll('#reportContent .reportCard h4')].find(x=>x.textContent.trim()==='Company brief');
-  if(briefTitle){const card=briefTitle.closest('.reportCard');const p=card?.querySelector('p');if(p)p.textContent=intel.fit_summary||`Workspace-specific analysis for ${workspace.name||'this project'}.`;}
-
-  const scoreTitle=[...document.querySelectorAll('#reportContent .reportCard h3')].find(x=>x.textContent.trim()==='Why this score');
+  const scoreTitle=[...document.querySelectorAll('#reportContent .reportCard h3')].find(x=>x.textContent.trim()==='Why this score'||x.textContent.trim()==='Why this workspace fit');
   if(scoreTitle){
     const card=scoreTitle.closest('.reportCard');
-    if(card){card.innerHTML=`<h3>Why this workspace fit</h3><div class="scoreList">${metricRows(intel.score_breakdown||[])||'<p>No workspace-specific score breakdown yet.</p>'}</div>`;}
+    if(card)card.innerHTML=`<h3>Why this workspace fit</h3><div class="scoreList">${metricRows(intel.score_breakdown||[])||'<p>Run workspace research to generate a workspace-specific score breakdown.</p>'}</div>`;
   }
 
   const opportunity=document.querySelector('#reportContent .opportunityCard');
@@ -103,9 +100,10 @@ function applyContext(){
   const opener=document.getElementById('openerEdit'),email=document.getElementById('emailEdit');
   const hasOffer=Boolean(String(workspace.offer||'').trim());
   const outreachHint=hasOffer?'No outreach draft was generated in this run. Refresh workspace research to retry.':'Add what you sell in Edit targeting, then run workspace research to generate outreach.';
-  if(opener && document.activeElement!==opener){opener.value=intel.personalized_opener||'';opener.placeholder=outreachHint;}
-  if(email && document.activeElement!==email){email.value=intel.email_draft||'';email.placeholder=outreachHint;}
-  if((opener||email) && !document.querySelector('.v73OutreachHint')){
+  if(opener&&document.activeElement!==opener){opener.value=intel.personalized_opener||'';opener.placeholder=outreachHint;}
+  if(email&&document.activeElement!==email){email.value=intel.email_draft||'';email.placeholder=outreachHint;}
+  document.querySelector('.v73OutreachHint')?.remove();
+  if(opener||email){
     const grid=(opener||email)?.closest('.reportGrid');
     if(grid)grid.insertAdjacentHTML('beforebegin',`<div class="v73OutreachHint ${hasOffer?'ready':'needsOffer'}">${hasOffer?'Outreach is generated from this Workspace offer and verified company evidence.':'Outreach needs an offer. Open Edit targeting and fill “What do you sell?” — Discover and Fit can still work without it.'}</div>`);
   }
@@ -115,13 +113,21 @@ function applyContext(){
 }
 
 function discoverEmpty(title,text){return `<div class="v7EmptyInline"><h3>${esc(title)}</h3><p>${esc(text)}</p></div>`}
+function discoverRow(p,broader=false){
+  const m=p.profile_match||{},reasons=(m.matched||[]).join(' · '),source=shortSource(p.universe_source),quality=qualityLabel(p);
+  const buttonText=p.selected?'Shortlisted ✓':'Shortlist';
+  return `<article class="v7CompanyRow v73CompanyRow ${broader?'v73BroaderRow':''}"><div><div class="v7CompanyName notranslate" translate="no">${esc(p.company)}</div><div class="v7CompanyMeta">${esc([p.company_type,p.country,p.audience].filter(Boolean).join(' · '))}</div><div class="v73SourceRow"><span class="v7Level">${esc(p.data_level||'Indexed')}</span><span class="v73Source">${esc(source)}</span><span class="badge ${qualityClass(p)} v73Quality">${esc(quality)} data · ${Number(p.completeness||0)}%</span></div></div><div><div class="v7CompanyDescription">${esc(p.description||'Basic company identity is indexed. Shortlist it to research products, customers, proof and signals.')}</div></div><div class="v7Match"><b>${Number(m.score||0)}%</b><span>${esc(m.label||'Profile match')}</span><div class="v7MatchReasons">${esc(reasons||(broader?'Weaker category evidence':'Basic criteria'))}</div></div><div class="v7CompanyActions"><button class="secondary small ${p.selected?'v7SelectedButton':''}" onclick="toggleV73Company(${Number(p.id)},${p.selected?'true':'false'})">${buttonText}</button></div></article>`;
+}
+
 async function renderV73Discover(page=discoverPage,q=discoverQuery){
   if(!activeWorkspaceId)return;
   discoverPage=Math.max(1,Number(page)||1);discoverQuery=String(q||'').trim();
   const body=document.querySelector('#v7TabBody');if(!body)return;
-  const stats=await getUniverseStats();
+  const [stats,expansion]=await Promise.all([getUniverseStats(),getExpansionStatus()]);
   const sourceText=(stats.sources||[]).slice(0,3).map(x=>`${shortSource(x.source)} ${Number(x.count||0).toLocaleString()}`).join(' · ')||'Public company sources';
-  body.innerHTML=`<div class="v73UniverseBar"><div><strong>Company Universe</strong><span>${Number(stats.total||0).toLocaleString()} indexed · ${Number(stats.with_website||0).toLocaleString()} with websites · ${Number(stats.with_description||0).toLocaleString()} described</span></div><small>${esc(sourceText)}</small></div><div class="v7DiscoverBar"><input id="v7DiscoverSearch" placeholder="Search within this market…" value="${esc(discoverQuery)}"><button class="secondary" onclick="runV7DiscoverSearch()">Search</button></div><div class="v7Hint">Discover searches LeadScope's local Company Universe. Profile match is based on the workspace criteria and basic public company data — it is not the deep research Fit score.</div><div class="v7CompanyList"><div class="v7EmptyInline">Finding matching companies…</div></div><div id="v73Pager"></div>`;
+  const totalIndexed=Number(expansion.company_count||stats.total||0),target=Number(expansion.target||10000),state=String(expansion.status||'idle');
+  const expansionText=(state==='running'||state==='starting')?`Indexing ${totalIndexed.toLocaleString()} / ${target.toLocaleString()}…`:state==='error'?`Indexing paused · ${totalIndexed.toLocaleString()} indexed`:`${totalIndexed.toLocaleString()} indexed`;
+  body.innerHTML=`<div class="v73UniverseBar"><div><strong>Company Universe</strong><span>${Number(stats.total||0).toLocaleString()} indexed · ${Number(stats.with_website||0).toLocaleString()} with websites · ${Number(stats.with_description||0).toLocaleString()} described</span><span class="v73UniverseLive">${esc(expansionText)}</span></div><small>${esc(sourceText)}</small></div><div class="v7DiscoverBar"><input id="v7DiscoverSearch" placeholder="Search within this market…" value="${esc(discoverQuery)}"><button class="secondary" onclick="runV7DiscoverSearch()">Search</button></div><div class="v7Hint">Matches only count companies with meaningful category evidence plus the workspace criteria. Weaker candidates are separated below instead of inflating the match count.</div><div id="v73BestSection"><div class="v7CompanyList"><div class="v7EmptyInline">Finding strong matches…</div></div></div><div id="v73Pager"></div><div id="v73BroaderSection"></div>`;
   const input=document.getElementById('v7DiscoverSearch');
   let timer=null;input?.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(()=>renderV73Discover(1,input.value),450)});
   try{
@@ -129,30 +135,30 @@ async function renderV73Discover(page=discoverPage,q=discoverQuery){
     if(!r.ok)throw new Error('Could not load Discover results.');
     const data=await r.json();
     const metric=document.querySelector('#v7MatchMetric');if(metric)metric.textContent=String(data.total_candidates||0);
-    const list=document.querySelector('#v7TabBody .v7CompanyList');
-    const items=data.items||[];
-    list.innerHTML=items.length?items.map(p=>{
-      const m=p.profile_match||{},reasons=(m.matched||[]).join(' · '),source=shortSource(p.universe_source),quality=qualityLabel(p);
-      return `<article class="v7CompanyRow v73CompanyRow"><div><div class="v7CompanyName notranslate" translate="no">${esc(p.company)}</div><div class="v7CompanyMeta">${esc([p.company_type,p.country,p.audience].filter(Boolean).join(' · '))}</div><div class="v73SourceRow"><span class="v7Level">${esc(p.data_level||'Indexed')}</span><span class="v73Source">${esc(source)}</span><span class="badge ${qualityClass(p)} v73Quality">${esc(quality)} data · ${Number(p.completeness||0)}%</span></div></div><div><div class="v7CompanyDescription">${esc(p.description||'Basic company identity is indexed. Select it to research products, customers, proof and signals.')}</div></div><div class="v7Match"><b>${Number(m.score||0)}%</b><span>${esc(m.label||'Profile match')}</span><div class="v7MatchReasons">${esc(reasons||'Basic criteria')}</div></div><div class="v7CompanyActions"><button class="secondary small ${p.selected?'v7SelectedButton':''}" onclick="toggleV73Company(${Number(p.id)},${p.selected?'true':'false'})">${p.selected?'Selected ✓':'Select'}</button></div></article>`;
-    }).join(''):discoverEmpty('No matches found','Try broader category, region or keyword settings.');
-    const pager=document.getElementById('v73Pager');
-    const pages=Math.max(1,Number(data.pages||1)),current=Math.max(1,Number(data.page||1));
-    if(pager && pages>1)pager.innerHTML=`<div class="v73Pager"><button class="secondary small" ${current<=1?'disabled':''} onclick="goV73DiscoverPage(${current-1})">← Previous</button><span>Page ${current} of ${pages} · ${Number(data.total_candidates||0)} matches</span><button class="secondary small" ${current>=pages?'disabled':''} onclick="goV73DiscoverPage(${current+1})">Next →</button></div>`;
-  }catch(e){const list=document.querySelector('#v7TabBody .v7CompanyList');if(list)list.innerHTML=discoverEmpty('Could not load matches',e.message||'Unknown error')}
+    const best=document.querySelector('#v73BestSection .v7CompanyList'),items=data.items||[];
+    best.innerHTML=items.length?items.map(p=>discoverRow(p,false)).join(''):discoverEmpty('No strong matches found','Try broader targeting or review the broader candidates below.');
+
+    const pager=document.getElementById('v73Pager'),pages=Math.max(1,Number(data.pages||1)),current=Math.max(1,Number(data.page||1));
+    if(pager&&pages>1)pager.innerHTML=`<div class="v73Pager"><button class="secondary small" ${current<=1?'disabled':''} onclick="goV73DiscoverPage(${current-1})">← Previous</button><span>Page ${current} of ${pages} · ${Number(data.total_candidates||0)} strong matches</span><button class="secondary small" ${current>=pages?'disabled':''} onclick="goV73DiscoverPage(${current+1})">Next →</button></div>`;
+
+    const broaderHost=document.getElementById('v73BroaderSection'),broader=data.broader_items||[];
+    if(broaderHost&&broader.length){
+      broaderHost.innerHTML=`<section class="v73Broader"><div class="v73BroaderHead"><div><h3>Broader candidates</h3><p>${Number(data.broader_candidates||broader.length)} companies have weaker category evidence. They are not counted in Matches, but you can still shortlist them.</p></div></div><div class="v7CompanyList">${broader.map(p=>discoverRow(p,true)).join('')}</div></section>`;
+    }
+  }catch(e){const list=document.querySelector('#v73BestSection .v7CompanyList');if(list)list.innerHTML=discoverEmpty('Could not load matches',e.message||'Unknown error')}
 }
 window.goV73DiscoverPage=function(page){renderV73Discover(page,discoverQuery);window.scrollTo({top:0,behavior:'smooth'})};
 window.runV7DiscoverSearch=function(){renderV73Discover(1,document.getElementById('v7DiscoverSearch')?.value||'')};
 window.toggleV73Company=async function(companyId,isSelected){
   if(!activeWorkspaceId)return;
   const r=await fetch(`/api/workspaces/${activeWorkspaceId}/selected/${companyId}`,{method:isSelected?'DELETE':'POST'});
-  if(!r.ok){alert('Could not update selection.');return}
+  if(!r.ok){alert('Could not update shortlist.');return}
   await window.openV7Workspace(activeWorkspaceId,'discover');
 };
 
 async function refreshWorkspaceCompany(){
   if(!activeWorkspaceId||!activeCompanyId)return;
-  const btn=document.querySelector('#reportHeader button.secondary');
-  const oldText=btn?.textContent||'Refresh workspace research';
+  const btn=document.querySelector('#reportHeader button.secondary'),oldText=btn?.textContent||'Refresh workspace research';
   try{
     if(btn){btn.disabled=true;btn.textContent='Refreshing…'}
     await fetch(`/api/workspaces/${activeWorkspaceId}/companies/${activeCompanyId}/context`,{method:'DELETE'});
@@ -164,7 +170,7 @@ async function refreshWorkspaceCompany(){
       const r=await fetch(`/api/workspaces/${activeWorkspaceId}/research/status`);if(!r.ok)throw new Error('Could not read workspace refresh status.');
       finalState=await r.json();if(finalState.status!=='running')break;
     }
-    if(finalState?.failed && !finalState?.done)throw new Error((finalState.errors||[])[0]?.error||'Workspace refresh failed.');
+    if(finalState?.failed&&!finalState?.done)throw new Error((finalState.errors||[])[0]?.error||'Workspace refresh failed.');
     if(typeof window.openCompany==='function')await window.openCompany(activeCompanyId);
     activeContext=await fetchContext(activeWorkspaceId,activeCompanyId);applyContext();
   }catch(e){alert('Workspace refresh error: '+(e?.message||'Unknown error'))}
