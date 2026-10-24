@@ -3,7 +3,12 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
-from .cordis_source import cordis_source_status, fetch_cordis_horizon_companies
+from .cordis_source import (
+    cordis_h2020_source_status,
+    cordis_source_status,
+    fetch_cordis_h2020_companies,
+    fetch_cordis_horizon_companies,
+)
 from .library_sources import company_universe_cursor_status, fetch_wikidata_europe_companies
 from .storage import company_count
 from .universe_merge import backfill_universe_taxonomy, merge_company_items
@@ -17,11 +22,11 @@ def _emit(callback: StatusCallback | None, **patch: Any) -> None:
 
 
 def run_company_universe_index(target: int = 10000, status_callback: StatusCallback | None = None) -> dict[str, Any]:
-    """Grow Company Universe using a resilient source cascade.
+    """Grow Company Universe using a resilient public-source cascade.
 
-    Wikidata is the broad identity source. When it stops producing unique domains for a
-    few batches, the indexer switches to CORDIS Horizon Europe private organisations.
-    One exhausted/flaky source never blocks the rest of the local indexing run.
+    Cascade: Wikidata -> CORDIS Horizon Europe -> CORDIS Horizon 2020.
+    Sources are merged by canonical domain. A source is left when it is exhausted or
+    repeatedly returns domains already present in the local Universe.
     """
     target = max(1000, min(int(target), 10000))
     total_added = 0
@@ -38,7 +43,7 @@ def run_company_universe_index(target: int = 10000, status_callback: StatusCallb
         message=f"Normalized {taxonomy_updated:,} existing profiles · starting public source cascade…",
     )
 
-    # Phase 1: Wikidata. Stop early when repeated batches only produce domains we already have.
+    # Phase 1: Wikidata.
     zero_add_streak = 0
     wikidata_batches = 0
     while company_count() < target and wikidata_batches < 120:
@@ -91,14 +96,23 @@ def run_company_universe_index(target: int = 10000, status_callback: StatusCallb
             break
         time.sleep(0.25)
 
-    # Phase 2: CORDIS Horizon Europe official open data.
-    if company_count() < target:
-        cordis_zero_streak = 0
+    def run_cordis_phase(
+        *,
+        source_key: str,
+        label: str,
+        fetcher: Callable[..., list[dict[str, Any]]],
+        status_reader: Callable[[], dict[str, Any]],
+        source_name: str,
+    ) -> None:
+        nonlocal total_added, total_updated, checked
+        if company_count() >= target:
+            return
+        zero_streak = 0
 
-        def cordis_progress(message: str) -> None:
+        def progress(message: str) -> None:
             _emit(
                 status_callback,
-                source="cordis",
+                source=source_key,
                 added=total_added,
                 updated=total_updated,
                 taxonomy_updated=taxonomy_updated,
@@ -107,42 +121,66 @@ def run_company_universe_index(target: int = 10000, status_callback: StatusCallb
             )
 
         while company_count() < target:
-            state = cordis_source_status()
+            state = status_reader()
             _emit(
                 status_callback,
-                source="cordis",
+                source=source_key,
+                cordis_programme=label,
                 cordis_offset=int(state.get("offset") or 0),
                 cordis_total=int(state.get("total") or 0),
-                message=f"CORDIS Horizon Europe · {company_count():,} / {target:,} indexed…",
+                message=f"CORDIS {label} · {company_count():,} / {target:,} indexed…",
             )
-            items = fetch_cordis_horizon_companies(limit=300, progress=cordis_progress)
+            items = fetcher(limit=300, progress=progress)
             if not items:
                 break
             result = merge_company_items(
                 items,
                 limit=max(0, target - company_count()),
-                source_name="CORDIS Horizon Europe · private organisations",
+                source_name=source_name,
             )
             added = int(result.get("added") or 0)
             updated = int(result.get("updated") or 0)
             total_added += added
             total_updated += updated
             checked += len(items)
-            cordis_zero_streak = cordis_zero_streak + 1 if added == 0 else 0
-            if "cordis" not in source_history:
-                source_history.append("cordis")
+            zero_streak = zero_streak + 1 if added == 0 else 0
+            if source_key not in source_history:
+                source_history.append(source_key)
             _emit(
                 status_callback,
-                source="cordis",
+                source=source_key,
                 added=total_added,
                 updated=total_updated,
                 taxonomy_updated=taxonomy_updated,
                 checked=checked,
-                message=f"{company_count():,} indexed · CORDIS batch +{added} new / {updated} enriched",
+                message=f"{company_count():,} indexed · CORDIS {label} batch +{added} new / {updated} enriched",
             )
-            if cordis_zero_streak >= 5:
+            if zero_streak >= 5:
+                _emit(
+                    status_callback,
+                    source=source_key,
+                    message=f"CORDIS {label} is yielding duplicates · moving to next source…",
+                )
                 break
             time.sleep(0.15)
+
+    # Phase 2: current Horizon Europe data.
+    run_cordis_phase(
+        source_key="cordis_horizon",
+        label="Horizon Europe",
+        fetcher=fetch_cordis_horizon_companies,
+        status_reader=cordis_source_status,
+        source_name="CORDIS Horizon Europe · private organisations",
+    )
+
+    # Phase 3: historical Horizon 2020 participant organisations.
+    run_cordis_phase(
+        source_key="cordis_h2020",
+        label="Horizon 2020",
+        fetcher=fetch_cordis_h2020_companies,
+        status_reader=cordis_h2020_source_status,
+        source_name="CORDIS Horizon 2020 · private organisations",
+    )
 
     reached = company_count() >= target
     result = {
