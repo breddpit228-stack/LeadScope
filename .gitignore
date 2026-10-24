@@ -7,4 +7,7 @@ data/company_universe_index_state.json
 data/cordis_horizon_index_state.json
 data/cordis_horizon_companies.json
 data/cordis-HORIZONprojects-csv.zip
+data/cordis_h2020_index_state.json
+data/cordis_h2020_companies.json
+data/cordis-h2020projects-csv.zip
 .DS_Store
