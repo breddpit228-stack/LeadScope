@@ -33,6 +33,7 @@ _GENERIC_DESCRIPTIONS = (
     "indexed from wikidata with an official website",
     "official website:",
 )
+_GENERIC_SEGMENTS = {"", "technology", "software", "company", "startup", "technology / company"}
 
 
 def canonical_category(values: list[str] | tuple[str, ...] | str) -> str:
@@ -89,12 +90,7 @@ def _merge_sources(existing: str, source_name: str) -> str:
 
 
 def merge_company_items(items: list[dict[str, Any]], limit: int = 1000, source_name: str = "Public company source") -> dict[str, int]:
-    """Insert new Universe records and enrich existing domains without overwriting research.
-
-    Deep-research fields are intentionally untouched. The merge only fills/strengthens the
-    basic Discover layer: country, city, public description, employee count, category/tags,
-    source URL and source provenance.
-    """
+    """Insert new Universe records and enrich existing domains without overwriting research."""
     added = 0
     updated = 0
     skipped = 0
@@ -143,10 +139,11 @@ def merge_company_items(items: list[dict[str, Any]], limit: int = 1000, source_n
                 if _meaningful_description(description) and not _meaningful_description(current_description):
                     changes["public_signals"] = description
                 current_segment = str(existing.get("segment") or "").strip()
-                if category and (not current_segment or current_segment.lower() in {"technology", "software", "company", "startup"}):
+                if category and current_segment.lower() in _GENERIC_SEGMENTS:
                     changes["segment"] = category
-                merged_tags = _merge_unique(_parse_tags(existing.get("seed_tags_json")), tags)
-                if merged_tags != _parse_tags(existing.get("seed_tags_json")):
+                existing_tags = _parse_tags(existing.get("seed_tags_json"))
+                merged_tags = _merge_unique(existing_tags, tags)
+                if merged_tags != existing_tags:
                     changes["seed_tags_json"] = json.dumps(merged_tags, ensure_ascii=False)
                 merged_source = _merge_sources(str(existing.get("seed_source") or ""), source_name)
                 if merged_source != str(existing.get("seed_source") or ""):
@@ -179,3 +176,61 @@ def merge_company_items(items: list[dict[str, Any]], limit: int = 1000, source_n
         conn.close()
 
     return {"added": added, "updated": updated, "skipped": skipped}
+
+
+def backfill_universe_taxonomy(limit: int = 20000) -> dict[str, int]:
+    """Fill missing/generic categories and taxonomy tags from existing basic profile text.
+
+    This deliberately avoids researched fields and never replaces a specific existing segment.
+    """
+    inspected = 0
+    updated = 0
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute("SELECT id,segment,public_signals,company_summary,seed_tags_json,quality_status FROM companies ORDER BY id LIMIT ?", (max(1, min(int(limit), 50000)),)).fetchall()
+        for row in rows:
+            inspected += 1
+            segment = str(row["segment"] or "").strip()
+            tags = _parse_tags(row["seed_tags_json"])
+            category = canonical_category([segment, str(row["public_signals"] or ""), str(row["company_summary"] or ""), *tags])
+            if not category:
+                continue
+            changes: dict[str, Any] = {}
+            if segment.lower() in _GENERIC_SEGMENTS:
+                changes["segment"] = category
+            merged_tags = _merge_unique(tags, [category])
+            if merged_tags != tags:
+                changes["seed_tags_json"] = json.dumps(merged_tags, ensure_ascii=False)
+            if changes:
+                changes["updated_at"] = now
+                assignments = ",".join(f"{key}=?" for key in changes)
+                conn.execute(f"UPDATE companies SET {assignments} WHERE id=?", [*changes.values(), int(row["id"])])
+                updated += 1
+        conn.commit()
+    finally:
+        conn.close()
+    return {"inspected": inspected, "updated": updated}
+
+
+def duplicate_domain_audit(limit: int = 100) -> dict[str, Any]:
+    """Report duplicate canonical domains without deleting records or breaking workspace IDs."""
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute("SELECT id,company,website FROM companies WHERE website<>'' ORDER BY id").fetchall()
+    finally:
+        conn.close()
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        domain = normalize_website(str(row["website"] or ""))
+        if domain:
+            groups.setdefault(domain, []).append({"id": int(row["id"]), "company": str(row["company"] or ""), "website": str(row["website"] or "")})
+    duplicates = [{"domain": domain, "records": items} for domain, items in groups.items() if len(items) > 1]
+    duplicates.sort(key=lambda x: (-len(x["records"]), x["domain"]))
+    return {
+        "duplicate_domains": len(duplicates),
+        "duplicate_records": sum(len(x["records"]) - 1 for x in duplicates),
+        "items": duplicates[:max(1, min(int(limit), 500))],
+    }
