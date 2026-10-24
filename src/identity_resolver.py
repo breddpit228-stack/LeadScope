@@ -6,8 +6,10 @@ from urllib.parse import urlparse
 
 import requests
 
+from .gleif_identity import lookup_legal_entities
+
 WIKIDATA_API = "https://www.wikidata.org/w/api.php"
-USER_AGENT = "LeadScope/6.3 (public company identity resolution; https://github.com/breddpit228-stack/LeadScope)"
+USER_AGENT = "LeadScope/7.3 (public company identity resolution; https://github.com/breddpit228-stack/LeadScope)"
 
 # A few high-confidence corporate-source hints for domains that are intentionally
 # product/storefront surfaces rather than useful company-research sources.
@@ -198,6 +200,20 @@ def resolve_company_identity(company_name: str, website: str = "") -> dict[str, 
                     add_source(parent_name, url, "parent company website", "Medium", parent_id)
 
     best = ranked[0] if ranked else None
+    legal_identity: dict[str, Any] = {"status": "unavailable", "items": [], "total": 0}
+    if search_term:
+        try:
+            legal_identity = lookup_legal_entities(str((best or {}).get("name") or search_term), limit=5, timeout=8)
+        except Exception as exc:
+            legal_identity = {
+                "status": "unavailable",
+                "items": [],
+                "total": 0,
+                "source": "GLEIF Global LEI Index",
+                "error": f"{type(exc).__name__}: {str(exc)[:180]}",
+                "note": "Legal identity lookup is supplementary and does not block website research.",
+            }
+
     return {
         "query": search_term,
         "submitted_website": website,
@@ -205,6 +221,7 @@ def resolve_company_identity(company_name: str, website: str = "") -> dict[str, 
         "best_identity": best,
         "identity_candidates": ranked[:5],
         "source_candidates": source_candidates[:8],
+        "legal_identity": legal_identity,
         "status": "resolved" if best else "not_found",
-        "note": "Candidates are suggestions from public identity data. LeadScope does not replace the submitted company or source automatically.",
+        "note": "Website candidates come from public identity data. GLEIF is used only as supplementary legal-entity evidence. LeadScope does not replace the submitted company or source automatically.",
     }
