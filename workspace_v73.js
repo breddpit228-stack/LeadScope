@@ -44,6 +44,9 @@ function installTaxonomy(){
   replaceInputWithSelect('v7WsIndustry',INDUSTRIES,'Choose category…');
   replaceInputWithSelect('v7WsRegion',REGIONS,'Choose country / region…');
   replaceInputWithSelect('v7WsSize',SIZES,'Choose company size…');
+  const offer=document.getElementById('v7WsOffer');
+  const label=offer?.closest('.v7Field')?.querySelector('label');
+  if(label)label.textContent='What do you sell? · needed for outreach';
 }
 
 async function fetchContext(workspaceId,companyId){
@@ -98,8 +101,14 @@ function applyContext(){
   if(angleTitle){const p=angleTitle.closest('.reportCard')?.querySelector('p');if(p)p.textContent=intel.suggested_angle||'No workspace-specific angle generated yet.';}
 
   const opener=document.getElementById('openerEdit'),email=document.getElementById('emailEdit');
-  if(opener && document.activeElement!==opener)opener.value=intel.personalized_opener||'';
-  if(email && document.activeElement!==email)email.value=intel.email_draft||'';
+  const hasOffer=Boolean(String(workspace.offer||'').trim());
+  const outreachHint=hasOffer?'No outreach draft was generated in this run. Refresh workspace research to retry.':'Add what you sell in Edit targeting, then run workspace research to generate outreach.';
+  if(opener && document.activeElement!==opener){opener.value=intel.personalized_opener||'';opener.placeholder=outreachHint;}
+  if(email && document.activeElement!==email){email.value=intel.email_draft||'';email.placeholder=outreachHint;}
+  if((opener||email) && !document.querySelector('.v73OutreachHint')){
+    const grid=(opener||email)?.closest('.reportGrid');
+    if(grid)grid.insertAdjacentHTML('beforebegin',`<div class="v73OutreachHint ${hasOffer?'ready':'needsOffer'}">${hasOffer?'Outreach is generated from this Workspace offer and verified company evidence.':'Outreach needs an offer. Open Edit targeting and fill “What do you sell?” — Discover and Fit can still work without it.'}</div>`);
+  }
 
   const refresh=document.querySelector('#reportHeader button.secondary');
   if(refresh){refresh.textContent='Refresh workspace research';refresh.onclick=()=>refreshWorkspaceCompany();}
@@ -138,23 +147,28 @@ window.toggleV73Company=async function(companyId,isSelected){
   const r=await fetch(`/api/workspaces/${activeWorkspaceId}/selected/${companyId}`,{method:isSelected?'DELETE':'POST'});
   if(!r.ok){alert('Could not update selection.');return}
   await window.openV7Workspace(activeWorkspaceId,'discover');
-  setTimeout(()=>renderV73Discover(discoverPage,discoverQuery),0);
 };
 
 async function refreshWorkspaceCompany(){
   if(!activeWorkspaceId||!activeCompanyId)return;
+  const btn=document.querySelector('#reportHeader button.secondary');
+  const oldText=btn?.textContent||'Refresh workspace research';
   try{
+    if(btn){btn.disabled=true;btn.textContent='Refreshing…'}
     await fetch(`/api/workspaces/${activeWorkspaceId}/companies/${activeCompanyId}/context`,{method:'DELETE'});
-    await window.researchCompany(activeCompanyId);
-    await fetch(`/api/workspaces/${activeWorkspaceId}/research`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({company_ids:[activeCompanyId],provider:'gemini'})});
-    const started=Date.now();
+    const start=await fetch(`/api/workspaces/${activeWorkspaceId}/research`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({company_ids:[activeCompanyId],provider:'gemini',refresh_facts:true})});
+    if(!start.ok)throw new Error('Could not start workspace refresh.');
+    const started=Date.now();let finalState=null;
     while(Date.now()-started<110000){
       await sleep(1200);
-      const r=await fetch(`/api/workspaces/${activeWorkspaceId}/research/status`);if(!r.ok)break;const st=await r.json();
-      if(st.status!=='running')break;
+      const r=await fetch(`/api/workspaces/${activeWorkspaceId}/research/status`);if(!r.ok)throw new Error('Could not read workspace refresh status.');
+      finalState=await r.json();if(finalState.status!=='running')break;
     }
+    if(finalState?.failed && !finalState?.done)throw new Error((finalState.errors||[])[0]?.error||'Workspace refresh failed.');
+    if(typeof window.openCompany==='function')await window.openCompany(activeCompanyId);
     activeContext=await fetchContext(activeWorkspaceId,activeCompanyId);applyContext();
   }catch(e){alert('Workspace refresh error: '+(e?.message||'Unknown error'))}
+  finally{if(btn){btn.disabled=false;btn.textContent=oldText}}
 }
 window.refreshWorkspaceCompany=refreshWorkspaceCompany;
 
