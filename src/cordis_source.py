@@ -19,16 +19,16 @@ CORDIS_CACHE_PATH = DATA_DIR / "cordis_horizon_companies.json"
 CORDIS_CURSOR_PATH = DATA_DIR / "cordis_horizon_index_state.json"
 USER_AGENT = "LeadScope/7.11 (public company-universe indexing; https://github.com/breddpit228-stack/LeadScope)"
 
-# CORDIS includes non-European partners too. Company Universe is European-first.
-EUROPE_COUNTRIES = {
-    "Albania", "Andorra", "Austria", "Belarus", "Belgium", "Bosnia and Herzegovina",
-    "Bulgaria", "Croatia", "Cyprus", "Czechia", "Czech Republic", "Denmark", "Estonia",
-    "Finland", "France", "Germany", "Greece", "Hungary", "Iceland", "Ireland", "Italy",
-    "Kosovo", "Latvia", "Liechtenstein", "Lithuania", "Luxembourg", "Malta", "Moldova",
-    "Republic of Moldova", "Monaco", "Montenegro", "Netherlands", "North Macedonia", "Norway",
-    "Poland", "Portugal", "Romania", "San Marino", "Serbia", "Slovakia", "Slovenia", "Spain",
-    "Sweden", "Switzerland", "Ukraine", "United Kingdom", "United Kingdom of Great Britain and Northern Ireland",
+COUNTRY_CODES = {
+    "AL":"Albania","AD":"Andorra","AT":"Austria","BY":"Belarus","BE":"Belgium","BA":"Bosnia and Herzegovina",
+    "BG":"Bulgaria","HR":"Croatia","CY":"Cyprus","CZ":"Czechia","DK":"Denmark","EE":"Estonia","FI":"Finland",
+    "FR":"France","DE":"Germany","EL":"Greece","GR":"Greece","HU":"Hungary","IS":"Iceland","IE":"Ireland",
+    "IT":"Italy","XK":"Kosovo","LV":"Latvia","LI":"Liechtenstein","LT":"Lithuania","LU":"Luxembourg","MT":"Malta",
+    "MD":"Moldova","MC":"Monaco","ME":"Montenegro","NL":"Netherlands","MK":"North Macedonia","NO":"Norway",
+    "PL":"Poland","PT":"Portugal","RO":"Romania","SM":"San Marino","RS":"Serbia","SK":"Slovakia","SI":"Slovenia",
+    "ES":"Spain","SE":"Sweden","CH":"Switzerland","UA":"Ukraine","UK":"United Kingdom","GB":"United Kingdom",
 }
+EUROPE_COUNTRIES = set(COUNTRY_CODES.values()) | {"Czech Republic", "Republic of Moldova", "United Kingdom of Great Britain and Northern Ireland"}
 
 
 def _norm_key(value: str) -> str:
@@ -42,6 +42,22 @@ def _pick(row: dict[str, Any], *names: str) -> str:
         if value:
             return value
     return ""
+
+
+def _country_name(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    upper = raw.upper()
+    if upper in COUNTRY_CODES:
+        return COUNTRY_CODES[upper]
+    if raw == "Czech Republic":
+        return "Czechia"
+    if raw == "Republic of Moldova":
+        return "Moldova"
+    if raw == "United Kingdom of Great Britain and Northern Ireland":
+        return "United Kingdom"
+    return raw
 
 
 def _website(value: str) -> str:
@@ -65,7 +81,7 @@ def _is_private_company(row: dict[str, Any]) -> bool:
     if "private" in activity and ("profit" in activity or "company" in activity):
         return True
     # Some CORDIS exports omit the decoded activity label but retain SME=yes.
-    return sme in {"true", "yes", "1", "y"} and activity not in {"pub", "hie", "rec", "oth"}
+    return sme in {"true", "yes", "1", "y"} and activity not in {"pub", "hes", "rec", "oth"}
 
 
 def _decode_csv(data: bytes) -> tuple[str, str]:
@@ -84,7 +100,6 @@ def _organization_members(zf: zipfile.ZipFile) -> list[str]:
     org = [n for n in names if "organi" in Path(n).name.lower()]
     if org:
         return org
-    # Fallback for future CORDIS naming changes: inspect headers for organisation fields.
     out: list[str] = []
     for name in names:
         try:
@@ -97,11 +112,7 @@ def _organization_members(zf: zipfile.ZipFile) -> list[str]:
 
 
 def extract_cordis_companies(zip_path: Path) -> list[dict[str, Any]]:
-    """Parse private, European Horizon organisations with a public website.
-
-    The parser deliberately tolerates CORDIS column/name changes and never assumes one
-    exact CSV schema. It is also exposed for offline regression tests with a synthetic zip.
-    """
+    """Parse European private for-profit Horizon organisations with a public website."""
     companies: dict[str, dict[str, Any]] = {}
     with zipfile.ZipFile(zip_path) as zf:
         members = _organization_members(zf)
@@ -112,9 +123,9 @@ def extract_cordis_companies(zip_path: Path) -> list[dict[str, Any]]:
                 if not _is_private_company(row):
                     continue
                 name = _pick(row, "name", "organisationName", "organizationName", "legalName", "shortName")
-                country = _pick(row, "country", "countryName", "organisationCountry", "organizationCountry")
+                country = _country_name(_pick(row, "country", "countryName", "organisationCountry", "organizationCountry"))
                 url = _website(_pick(row, "organizationURL", "organisationURL", "organisationUrl", "organizationUrl", "website", "webSite", "url"))
-                if not name or not url or (country and country not in EUROPE_COUNTRIES):
+                if not name or not url or not country or country not in EUROPE_COUNTRIES:
                     continue
                 key = re.sub(r"^www\.", "", re.sub(r"^https?://", "", url.lower())).split("/")[0].split(":")[0]
                 if not key:
