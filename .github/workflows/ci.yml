@@ -48,10 +48,11 @@ jobs:
           print('LeadScope runtime smoke test OK · version', app.app.version)
           PY
 
-      - name: Workspace v7.3 flow smoke test
+      - name: Workspace v7.5 flow smoke test
         run: |
           python - <<'PY'
           import app
+          from src.workspace_v7 import profile_match
 
           def endpoint(path, method='GET'):
               for route in app.app.routes:
@@ -73,24 +74,42 @@ jobs:
           u = universe()
           assert isinstance(u, dict) and 'total' in u and 'sources' in u
 
-          ws = create({'name':'CI Fintech','industry':'Fintech','region':'Europe','audience':'B2B','keywords':'payments','offer':'Research automation'})
+          ws_payload={'name':'CI Fintech','industry':'Fintech','region':'Europe','audience':'B2B','company_size':'51–200','keywords':'payments, payroll','offer':'Research automation'}
+          ws = create(ws_payload)
           assert ws['id']
           assert any(x['id'] == ws['id'] for x in index()['items'])
           found = discover(ws['id'], q='', limit=10, page=1)
-          assert 'items' in found and 'total_candidates' in found and 'pages' in found
+          assert 'items' in found and 'broader_items' in found and 'total_candidates' in found and 'broader_candidates' in found and 'pages' in found
           if found['items']:
               cid = int(found['items'][0]['id'])
               select(ws['id'], cid)
               state = detail(ws['id'])
               assert state['counts']['selected'] >= 1
+              assert 'ready' in state and 'source_issues' in state
               ctx = context(ws['id'], cid)
               assert ctx['company_id'] == cid and 'profile_match' in ctx and 'decision' in ctx
+
+          strong = profile_match({
+              'company_type':'Fintech','category':'Fintech','audience':'B2B','description':'Payments and payroll software for businesses',
+              'country':'Poland','city':'Warsaw','team_size_public':''
+          }, ws_payload)
+          assert 70 <= strong['score'] < 100, strong
+          assert strong['tier'] == 'best'
+          broad = profile_match({
+              'company_type':'Professional services','category':'Technology consulting','audience':'B2B',
+              'description':'Software consulting for clients including the financial services sector',
+              'country':'Poland','city':'Warsaw','team_size_public':''
+          }, ws_payload)
+          assert broad['score'] < 70, broad
+          assert broad['tier'] == 'broader', broad
+
           asset = js_asset()
           v73 = v73_asset()
-          assert b'Your workspaces' in asset.body and b'openV7Workspace' in asset.body
-          assert b'Company Universe' in v73.body and b'Workspace fit' in v73.body
+          assert b'Your workspaces' in asset.body and b'Shortlist' in asset.body and b'openV7Workspace' in asset.body
+          assert b'Selected companies' not in asset.body
+          assert b'Broader candidates' in v73.body and b'Company Universe' in v73.body and b'Workspace fit' in v73.body
           assert remove(ws['id'])['ok'] is True
-          print('Workspace v7.3 flow OK')
+          print('Workspace v7.5 flow OK')
           PY
 
       - name: Check JavaScript syntax
