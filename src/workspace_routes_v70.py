@@ -151,7 +151,7 @@ def register_workspace_routes(app, core) -> None:
             raise HTTPException(404, "Workspace not found")
         return {"ok": True, "workspace": item}
 
-    def run_batch(workspace_id: str, company_ids: list[int], provider_name: str = "gemini") -> None:
+    def run_batch(workspace_id: str, company_ids: list[int], provider_name: str = "gemini", refresh_facts: bool = False) -> None:
         workspace = get_workspace(workspace_id)
         if not workspace:
             with _BATCH_LOCK:
@@ -169,7 +169,10 @@ def register_workspace_routes(app, core) -> None:
             with _BATCH_LOCK:
                 _BATCHES[workspace_id]["current"] = str(company.get("company") or "Company")
             try:
-                if not str(company.get("quality_status") or "").strip():
+                # Facts are reusable across workspaces. A normal workspace run reuses
+                # them; an explicit refresh updates the factual layer first, still
+                # without generating the old global/demo outreach interpretation.
+                if refresh_facts or not str(company.get("quality_status") or "").strip():
                     core.analyze_company(
                         company_id,
                         fetch_live=True,
@@ -210,6 +213,7 @@ def register_workspace_routes(app, core) -> None:
         requested = (payload or {}).get("company_ids") or []
         requested_ids = {int(x) for x in requested if str(x).isdigit()} if isinstance(requested, list) else set()
         provider_name = str((payload or {}).get("provider") or "gemini")
+        refresh_facts = bool((payload or {}).get("refresh_facts"))
         candidates = detail.get("selected") or []
         ids: list[int] = []
         for profile in candidates:
@@ -219,11 +223,11 @@ def register_workspace_routes(app, core) -> None:
             decision = str((profile.get("decision") or {}).get("decision") or "")
             if decision == "SOURCE NEEDED":
                 continue
-            if decision == "RESEARCH" and cid > 0:
+            if cid > 0 and (refresh_facts or decision == "RESEARCH"):
                 ids.append(cid)
         if not ids:
             return {"status": "idle", "total": 0, "done": 0, "failed": 0, "current": "", "message": "No selected companies are waiting for workspace research."}
-        thread = threading.Thread(target=run_batch, args=(workspace_id, ids, provider_name), daemon=True, name=f"workspace-research-{workspace_id}")
+        thread = threading.Thread(target=run_batch, args=(workspace_id, ids, provider_name, refresh_facts), daemon=True, name=f"workspace-research-{workspace_id}")
         thread.start()
         return {"status": "running", "total": len(ids), "done": 0, "failed": 0, "current": ""}
 
