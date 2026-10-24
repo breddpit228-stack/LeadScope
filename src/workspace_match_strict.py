@@ -88,6 +88,7 @@ def apply_strict_match(
     raw_score = max(0, min(100, int(out.get("score") or 0)))
     requirements: list[dict[str, str]] = []
     gaps = list(out.get("gaps") or [])
+    base_matched = list(out.get("matched") or [])
 
     industry = str(workspace.get("industry") or "").strip()
     relation = dict(out.get("industry_relation") or {})
@@ -200,6 +201,7 @@ def apply_strict_match(
 
     marks = {"match": "✓", "partial": "~", "unknown": "?", "mismatch": "×"}
     requirement_summary = [f"{r['label']} {marks.get(r['status'], '?')}" for r in requirements]
+    keyword_summary = [x for x in base_matched if str(x).startswith("Keywords")]
     for r in requirements:
         if r["status"] in {"unknown", "mismatch", "partial"} and r["reason"] not in gaps:
             gaps.append(r["reason"])
@@ -215,6 +217,7 @@ def apply_strict_match(
         "unknown_required": unknowns,
         "mismatched_required": mismatches,
         "partial_required": partials,
+        "matched": (requirement_summary + keyword_summary)[:5],
         "gaps": gaps[:8],
     })
     return out
