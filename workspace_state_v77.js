@@ -81,6 +81,30 @@ function ensureSearchSummary(text){
   }
   if(el)el.textContent=text;
 }
+async function recoverIndexerIfNeeded(){
+  if(currentTab!=='discover')return;
+  try{
+    const response=await nativeFetch('/api/library/expand/status');
+    if(!response.ok)return;
+    const status=await response.json();
+    const state=String(status.status||'idle');
+    const count=Number(status.company_count||0);
+    const target=Number(status.target||10000);
+    const live=document.querySelector('.v73UniverseLive');
+    if(state==='error'&&live){
+      live.textContent=String(status.message||`Indexing paused at ${count.toLocaleString()} companies.`);
+      live.style.color='#b42318';
+    }
+    if(count>=target||!['error','idle'].includes(state))return;
+    const memory=readState();
+    const lastRetry=Number(memory.indexRetryAt||0);
+    if(Date.now()-lastRetry<60000)return;
+    saveState({indexRetryAt:Date.now()});
+    try{sessionStorage.removeItem('leadscope_company_universe_expand_started_v76')}catch(e){}
+    const retry=await nativeFetch('/api/library/expand?target=10000',{method:'POST'});
+    if(retry.ok&&live){live.textContent=`Retrying public company indexing · ${count.toLocaleString()} / ${target.toLocaleString()}…`;live.style.color='#315efb'}
+  }catch(e){console.debug('LeadScope index recovery skipped',e)}
+}
 async function captureDiscoverResult(){
   if(currentTab!=='discover')return;
   const settled=await waitDiscoverSettled();
@@ -95,6 +119,7 @@ async function captureDiscoverResult(){
     const marketMatches=Number.isFinite(currentCount)?currentCount:(state.marketMatches||null);
     saveState({query:'',page:state.page||1,marketMatches});
     ensureSearchSummary('');
+    await recoverIndexerIfNeeded();
     return;
   }
   const searchCount=Number.isFinite(currentCount)?currentCount:0;
@@ -103,6 +128,7 @@ async function captureDiscoverResult(){
   const broader=document.querySelector('#v73BroaderSection .v73BroaderHead p');
   const broaderCount=broader?Number((broader.textContent.match(/\d+/)||[0])[0]):0;
   ensureSearchSummary(`Search results · ${searchCount} strong${broaderCount?` · ${broaderCount} broader`:''}`);
+  await recoverIndexerIfNeeded();
 }
 function scheduleDiscoverCapture(delay=0){setTimeout(()=>captureDiscoverResult().catch(()=>{}),delay)}
 
