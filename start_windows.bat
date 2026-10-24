@@ -69,6 +69,10 @@ if errorlevel 1 (
   exit /b 1
 )
 
+REM Resume Company Universe indexing on every app start. This is best-effort and
+REM independent of which Workspace tab the browser opens first.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -UseBasicParsing -Method POST -Uri 'http://127.0.0.1:8000/api/library/expand?target=10000' -TimeoutSec 4 | Out-Null } catch { }" >nul 2>nul
+
 start "" http://127.0.0.1:8000
 exit /b 0
 
