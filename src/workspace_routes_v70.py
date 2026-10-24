@@ -10,9 +10,11 @@ from .company_universe import universe_stats
 from .storage import get_company
 from .workspace_intelligence import build_workspace_intelligence
 from .workspace_projects import (
+    clear_workspace_result,
     create_workspace,
     delete_workspace,
     get_workspace,
+    get_workspace_result,
     select_company,
     select_many,
     set_workspace_result,
@@ -105,6 +107,26 @@ def register_workspace_routes(app, core) -> None:
             raise HTTPException(404, "Company is not selected in this workspace")
         return context
 
+    @app.patch("/api/workspaces/{workspace_id}/companies/{company_id}/context")
+    def api_workspace_company_context_patch(workspace_id: str, company_id: int, payload: dict[str, Any]):
+        current = get_workspace_result(workspace_id, company_id)
+        if current is None:
+            raise HTTPException(404, "Workspace intelligence has not been generated yet")
+        allowed = {"personalized_opener", "email_draft", "suggested_angle"}
+        merged = dict(current)
+        for key in allowed:
+            if key in payload:
+                merged[key] = str(payload.get(key) or "")[:5000]
+        set_workspace_result(workspace_id, company_id, merged)
+        context = workspace_company_context(workspace_id, company_id)
+        if not context:
+            raise HTTPException(404, "Workspace context not found")
+        return context
+
+    @app.delete("/api/workspaces/{workspace_id}/companies/{company_id}/context")
+    def api_workspace_company_context_delete(workspace_id: str, company_id: int):
+        return {"ok": clear_workspace_result(workspace_id, company_id)}
+
     @app.post("/api/workspaces/{workspace_id}/selected/{company_id}")
     def api_workspace_select(workspace_id: str, company_id: int):
         if not get_company(company_id):
@@ -147,7 +169,6 @@ def register_workspace_routes(app, core) -> None:
             with _BATCH_LOCK:
                 _BATCHES[workspace_id]["current"] = str(company.get("company") or "Company")
             try:
-                # Facts are reusable across workspaces. Only crawl/extract when missing.
                 if not str(company.get("quality_status") or "").strip():
                     core.analyze_company(
                         company_id,
