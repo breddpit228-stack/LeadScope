@@ -38,11 +38,7 @@ EUROPE_WIKIDATA_COUNTRIES: list[tuple[str, str]] = [
 
 
 def _wikidata_request(query: str, timeout: int, retries: int = 2) -> dict[str, Any]:
-    """Run a bounded public Wikidata query with short transient-error retries.
-
-    The indexer is best-effort. A single slow public SPARQL shard must never make the
-    whole local product appear frozen for minutes.
-    """
+    """Run a bounded public Wikidata query with short transient-error retries."""
     last_error: Exception | None = None
     for attempt in range(max(1, retries)):
         try:
@@ -179,8 +175,7 @@ def _load_cursor() -> dict[str, Any]:
     try:
         value = json.loads(_CURSOR_PATH.read_text(encoding="utf-8"))
         if isinstance(value, dict):
-            # Preserve progress when moving from the older cursor format instead of
-            # silently sending the user back to the first UK batch.
+            # Preserve progress across cursor schema upgrades.
             base = _default_cursor()
             for key in ("phase", "country_index", "offset", "checked", "complete", "skipped_shards", "last_error"):
                 if key in value:
@@ -219,15 +214,14 @@ def company_universe_cursor_status() -> dict[str, Any]:
 def fetch_wikidata_europe_companies(limit: int = 100, offset: int = 0, timeout: int = 12) -> list[dict[str, Any]]:
     """Return the next resumable Company Universe batch.
 
-    Public SPARQL is allowed to be flaky. After the bounded request retries are exhausted,
-    LeadScope records that shard and advances instead of freezing the entire local indexer.
-    `offset` remains only for compatibility with the worker; the persisted cursor is real.
+    Public SPARQL is allowed to be flaky. After bounded retries are exhausted, the
+    current country shard is deferred and indexing continues with another country.
     """
     del offset
     limit = max(1, min(int(limit), 150))
     state = _load_cursor()
     attempts = 0
-    max_attempts = len(EUROPE_WIKIDATA_COUNTRIES) * 2 + 2
+    max_attempts = 8
     while not state.get("complete") and attempts < max_attempts:
         attempts += 1
         idx = int(state.get("country_index") or 0)
@@ -253,11 +247,9 @@ def fetch_wikidata_europe_companies(limit: int = 100, offset: int = 0, timeout: 
                 skipped.append(shard)
             state["skipped_shards"] = skipped[-100:]
             state["last_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
-            # The request has already exhausted its own retries, so defer this shard and
-            # move on. Missing one page is better than blocking every other country.
-            state["offset"] = current_offset + limit
-            if current_offset >= 12000:
-                _advance_cursor(state)
+            # The request already exhausted retries. Defer this country for this phase
+            # instead of walking every offset in a source that is currently unhealthy.
+            _advance_cursor(state)
             _save_cursor(state)
             continue
 
@@ -271,5 +263,8 @@ def fetch_wikidata_europe_companies(limit: int = 100, offset: int = 0, timeout: 
         items = list(batch.get("items") or [])
         if items:
             return items
+
     _save_cursor(state)
-    return []
+    if state.get("complete"):
+        return []
+    raise RuntimeError(f"Public company source unavailable across {attempts} consecutive country shards; will retry on the next indexer run")
