@@ -26,9 +26,12 @@ jobs:
         run: |
           python -m py_compile app.py app_core.py
           python -m py_compile src/*.py
+          python -m py_compile test_universe_merge.py
 
       - name: Run backend tests
-        run: python run_tests.py
+        run: |
+          python run_tests.py
+          python test_universe_merge.py
 
       - name: Runtime API smoke test
         run: |
@@ -75,6 +78,7 @@ jobs:
 
           u = universe()
           assert isinstance(u, dict) and 'total' in u and 'sources' in u
+          assert 'coverage' in u and 'category' in u['coverage'] and 'team_size' in u['coverage']
 
           ws_payload={'name':'CI Fintech','industry':'Fintech','region':'Europe','audience':'B2B','company_size':'51–200','keywords':'payments, payroll','offer':'Research automation'}
           ws = create(ws_payload)
