@@ -81,8 +81,8 @@ def apply_strict_match(
     """Turn an arithmetic profile score into an evidence-aware Discover decision.
 
     The original matcher still supplies weighted scoring and industry relationship evidence.
-    This layer prevents unknown or contradictory required criteria from appearing as a
-    'Strong match'. It never invents missing company facts.
+    This layer prevents unknown, contradictory, or taxonomy-only criteria from appearing as
+    a 'Strong match'. It never invents missing company facts.
     """
     out = dict(base or {})
     raw_score = max(0, min(100, int(out.get("score") or 0)))
@@ -94,16 +94,27 @@ def apply_strict_match(
     relation = dict(out.get("industry_relation") or {})
     if industry:
         kind = str(relation.get("kind") or "none")
-        if kind == "primary" and int(out.get("industry_points") or 0) >= 30:
+        industry_points = int(out.get("industry_points") or 0)
+        # The base matcher uses 36/40 for a taxonomy/seed-tag hit with no confirming
+        # industry phrase in the description. That is useful retrieval evidence, but it
+        # is not strong enough to call the company a verified primary-industry match.
+        taxonomy_only = kind == "primary" and industry_points == 36
+        if kind == "primary" and industry_points >= 30 and not taxonomy_only:
             status = "match"
+            industry_reason = str(relation.get("label") or f"Primary industry · {industry}")
+        elif taxonomy_only:
+            status = "partial"
+            industry_reason = f"Taxonomy suggests {industry}, but the public description does not confirm it yet."
         elif kind in {"adjacent", "serves"}:
             status = "partial"
+            industry_reason = str(relation.get("label") or f"Adjacent to {industry}")
         else:
             status = "mismatch"
+            industry_reason = str(relation.get("label") or "No convincing primary-industry evidence.")
         requirements.append(_requirement(
             "industry", "Industry", status,
             str(relation.get("label") or "Not verified"), industry,
-            str(relation.get("label") or "No convincing primary-industry evidence."),
+            industry_reason,
         ))
 
     region = str(workspace.get("region") or "").strip()
