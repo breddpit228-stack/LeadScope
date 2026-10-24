@@ -34,7 +34,7 @@ def main():
         'company_type': 'Fintech', 'category': 'Fintech', 'audience': 'B2B',
         'country': 'Poland', 'city': 'Warsaw', 'team_size_public': '',
     }
-    r = apply_strict_match(base(), unknown_size_profile, WORKSPACE, {})
+    r = apply_strict_match(base(score=90, industry_points=40), unknown_size_profile, WORKSPACE, {})
     assert r['tier'] == 'broader', r
     assert r['score'] <= 69, r
     assert r['label'] == 'Promising but incomplete', r
@@ -46,7 +46,7 @@ def main():
         'company_type': 'Fintech', 'category': 'Fintech', 'audience': 'Unknown',
         'country': 'Poland', 'city': 'Warsaw', 'team_size_public': '300',
     }
-    r = apply_strict_match(base(), retail_bank, WORKSPACE, {'team_size_public': '300'})
+    r = apply_strict_match(base(score=90, industry_points=40), retail_bank, WORKSPACE, {'team_size_public': '300'})
     assert r['tier'] == 'broader', r
     assert r['score'] <= 49, r
     assert any(x['key'] == 'audience' and x['status'] == 'mismatch' and x['value'] == 'B2C' for x in r['requirements']), r
@@ -72,6 +72,19 @@ def main():
     assert r['tier'] == 'broader', r
     assert r['score'] <= 59, r
     assert any(x['key'] == 'industry' and x['status'] == 'partial' for x in r['requirements']), r
+
+    # A stale/seed taxonomy label alone must not make an unrelated company a strong
+    # Fintech match. 36/40 is the base matcher's taxonomy-only primary score.
+    stale_taxonomy = {
+        'description': 'Satellite radar intelligence for infrastructure monitoring and decision makers.',
+        'company_type': 'Technology / company', 'category': 'Fintech', 'audience': 'B2B',
+        'country': 'Poland', 'city': 'Warsaw', 'team_size_public': '300',
+    }
+    r = apply_strict_match(base(score=93, kind='primary', industry_points=36), stale_taxonomy, WORKSPACE, {'team_size_public': '300'})
+    assert r['tier'] == 'broader', r
+    assert r['score'] <= 59, r
+    assert any(x['key'] == 'industry' and x['status'] == 'partial' for x in r['requirements']), r
+    assert 'Taxonomy suggests Fintech' in next(x['reason'] for x in r['requirements'] if x['key'] == 'industry'), r
 
     print('Strict workspace match tests OK')
 
