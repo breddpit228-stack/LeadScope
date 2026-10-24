@@ -14,7 +14,7 @@ from src.data_engine import summarize_library
 from src.data_engine_ext import company_profile
 from src.identity_resolver import resolve_company_identity
 from src.library_sources import fetch_wikidata_europe_companies
-from src.universe_merge import merge_company_items
+from src.universe_merge import backfill_universe_taxonomy, duplicate_domain_audit, merge_company_items
 from src.storage import (
     company_count,
     dashboard_stats,
@@ -34,19 +34,27 @@ def _read(name: str) -> str:
     return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
-_LIBRARY_EXPAND = {"status": "idle", "target": 10000, "added": 0, "updated": 0, "checked": 0, "message": ""}
+_LIBRARY_EXPAND = {"status": "idle", "target": 10000, "added": 0, "updated": 0, "taxonomy_updated": 0, "checked": 0, "message": ""}
 _LIBRARY_EXPAND_LOCK = threading.Lock()
 
 
 def _library_expand_worker(target: int = 10000) -> None:
     target = max(1000, min(int(target), 10000))
     with _LIBRARY_EXPAND_LOCK:
-        _LIBRARY_EXPAND.update(status="running", target=target, message="Indexing and enriching public European companies…")
+        _LIBRARY_EXPAND.update(status="running", target=target, message="Normalizing existing Company Universe profiles…")
     offset = 0
     batch_size = 250
     total_added = 0
     total_updated = 0
+    taxonomy_updated = 0
     try:
+        taxonomy = backfill_universe_taxonomy(limit=max(target * 2, 20000))
+        taxonomy_updated = int(taxonomy.get("updated") or 0)
+        with _LIBRARY_EXPAND_LOCK:
+            _LIBRARY_EXPAND.update(
+                taxonomy_updated=taxonomy_updated,
+                message=f"Normalized {taxonomy_updated} existing profiles · continuing public indexing…",
+            )
         while company_count() < target and offset < 30000:
             items = fetch_wikidata_europe_companies(limit=batch_size, offset=offset)
             if not items:
@@ -63,8 +71,9 @@ def _library_expand_worker(target: int = 10000) -> None:
                 _LIBRARY_EXPAND.update(
                     added=total_added,
                     updated=total_updated,
+                    taxonomy_updated=taxonomy_updated,
                     checked=offset,
-                    message=f"{company_count()} companies indexed · {total_updated} existing profiles enriched · batch {offset // batch_size}",
+                    message=f"{company_count()} companies indexed · {total_updated + taxonomy_updated} profiles enriched · batch {offset // batch_size}",
                 )
             time.sleep(0.8)
         with _LIBRARY_EXPAND_LOCK:
@@ -72,8 +81,9 @@ def _library_expand_worker(target: int = 10000) -> None:
                 status="done",
                 added=total_added,
                 updated=total_updated,
+                taxonomy_updated=taxonomy_updated,
                 checked=offset,
-                message=f"Company Universe contains {company_count()} companies · {total_updated} existing profiles enriched",
+                message=f"Company Universe contains {company_count()} companies · {total_updated + taxonomy_updated} profiles enriched",
             )
     except Exception as exc:
         with _LIBRARY_EXPAND_LOCK:
@@ -81,6 +91,7 @@ def _library_expand_worker(target: int = 10000) -> None:
                 status="error",
                 added=total_added,
                 updated=total_updated,
+                taxonomy_updated=taxonomy_updated,
                 checked=offset,
                 message=f"Library expansion paused: {type(exc).__name__}: {str(exc)[:240]}",
             )
@@ -97,8 +108,9 @@ def api_library_expand(target: int = 10000):
             target=target,
             added=0,
             updated=0,
+            taxonomy_updated=0,
             checked=0,
-            message="Starting public company indexing and enrichment…",
+            message="Starting Company Universe indexing and enrichment…",
         )
     threading.Thread(target=_library_expand_worker, args=(target,), daemon=True, name="library-expand").start()
     return {"status": "starting", "target": target}
@@ -108,6 +120,12 @@ def api_library_expand(target: int = 10000):
 def api_library_expand_status():
     with _LIBRARY_EXPAND_LOCK:
         return dict(_LIBRARY_EXPAND) | {"company_count": company_count()}
+
+
+@app.get("/api/company-universe/audit")
+def api_company_universe_audit():
+    """Developer-facing duplicate-domain audit; never deletes company IDs automatically."""
+    return duplicate_domain_audit(limit=100)
 
 
 def _filter_profiles(profiles: list[dict[str, Any]], level: str, decision: str, audience: str) -> list[dict[str, Any]]:
