@@ -46,14 +46,56 @@ def _industry_terms(value: str) -> list[str]:
     return terms[:10]
 
 
+def _range(value: str) -> tuple[int, int] | None:
+    text = str(value or "").replace("–", "-").replace("—", "-")
+    nums = [int(x.replace(",", "")) for x in re.findall(r"\d[\d,]*", text)]
+    if not nums:
+        return None
+    if "+" in text:
+        return nums[0], 10**9
+    if len(nums) == 1:
+        return nums[0], nums[0]
+    return min(nums[0], nums[1]), max(nums[0], nums[1])
+
+
+def _ranges_overlap(a: tuple[int, int], b: tuple[int, int]) -> bool:
+    return max(a[0], b[0]) <= min(a[1], b[1])
+
+
+def _industry_component(profile: dict[str, Any], industry_value: str) -> tuple[int, list[str], str]:
+    terms = _industry_terms(industry_value)
+    if not terms:
+        return 0, [], "No category target configured."
+
+    structured = " ".join([
+        str(profile.get("company_type") or ""),
+        str(profile.get("category") or ""),
+    ]).lower()
+    description = str(profile.get("description") or "").lower()
+
+    structured_hits = [term for term in terms if term and term in structured]
+    description_hits = [term for term in terms if term and term in description]
+    # Preserve order while removing aliases that matched the same phrase repeatedly.
+    structured_hits = list(dict.fromkeys(structured_hits))
+    description_hits = list(dict.fromkeys(description_hits))
+
+    if structured_hits:
+        return 40, structured_hits[:4], "Structured company category matches the workspace category."
+    if len(description_hits) >= 3:
+        return 30, description_hits[:4], "Several category signals appear in the company description."
+    if len(description_hits) == 2:
+        return 24, description_hits[:4], "Two category signals appear in the company description."
+    if len(description_hits) == 1:
+        return 12, description_hits[:4], "Only one broad category signal appears in the company description."
+    return 0, [], "No convincing category evidence in the basic profile."
+
+
 def profile_match(profile: dict[str, Any], workspace: dict[str, Any]) -> dict[str, Any]:
-    hay = " ".join([
+    description_hay = " ".join([
+        str(profile.get("description") or ""),
         str(profile.get("company_type") or ""),
         str(profile.get("category") or ""),
         str(profile.get("audience") or ""),
-        str(profile.get("description") or ""),
-        str(profile.get("country") or ""),
-        str(profile.get("city") or ""),
     ]).lower()
 
     earned = 0.0
@@ -63,58 +105,121 @@ def profile_match(profile: dict[str, Any], workspace: dict[str, Any]) -> dict[st
     components: list[dict[str, Any]] = []
 
     industry_value = str(workspace.get("industry") or "").strip()
-    industries = _industry_terms(industry_value)
-    if industries:
-        possible += 45
-        hits = [x for x in industries if x in hay or any(w in hay for w in _words(x) if len(w) >= 3)]
-        points = 45 if len(hits) >= 2 else 35 if hits else 0
-        earned += points
-        if hits:
-            matched.append(f"Industry · {industry_value or hits[0]}")
-        components.append({"label": "Industry / category", "points": points, "max_points": 45, "reason": ", ".join(hits[:4]) if hits else "No category evidence in the basic profile."})
+    industry_points = 0
+    if industry_value:
+        possible += 40
+        industry_points, industry_hits, industry_reason = _industry_component(profile, industry_value)
+        earned += industry_points
+        if industry_points >= 24:
+            matched.append(f"Industry · {industry_value}")
+        elif industry_points:
+            matched.append(f"Industry signal · {industry_value}")
+        components.append({
+            "label": "Industry / category", "points": industry_points, "max_points": 40,
+            "reason": industry_reason + ((" Evidence: " + ", ".join(industry_hits[:4])) if industry_hits else ""),
+        })
 
     regions = _parts(workspace.get("region") or "")
     if regions:
-        possible += 25
-        hits = [x for x in regions if _region_hit(x, profile)]
-        points = 25 if hits else 0
+        possible += 20
+        region_hits = [x for x in regions if _region_hit(x, profile)]
+        points = 20 if region_hits else 0
         earned += points
-        if hits:
-            matched.append(f"Location · {hits[0]}")
-        components.append({"label": "Location", "points": points, "max_points": 25, "reason": str(profile.get("country") or "Country not verified")})
+        if region_hits:
+            matched.append(f"Location · {region_hits[0]}")
+        else:
+            gaps.append("Location is outside the selected region or is not verified.")
+        components.append({
+            "label": "Location", "points": points, "max_points": 20,
+            "reason": str(profile.get("country") or "Country not verified"),
+        })
 
     audience = str(workspace.get("audience") or "Any").strip().lower()
     if audience and audience != "any":
         possible += 15
-        actual = str(profile.get("audience") or "").lower()
-        hit = audience in actual or (audience == "b2b" and "b2b" in actual) or (audience == "b2c" and "b2c" in actual)
-        points = 15 if hit else 0
+        actual = str(profile.get("audience") or "").strip().lower()
+        if actual == audience:
+            points = 15
+        elif audience in {"b2b", "b2c"} and actual == "mixed b2b/b2c":
+            points = 8
+        else:
+            points = 0
         earned += points
-        if hit:
-            matched.append(audience.upper())
-        components.append({"label": "Business model", "points": points, "max_points": 15, "reason": str(profile.get("audience") or "Not classified")})
+        if points:
+            matched.append(audience.upper() if points == 15 else f"Partial {audience.upper()}")
+        elif not actual or actual == "unknown":
+            gaps.append("Business model is not verified.")
+        components.append({
+            "label": "Business model", "points": points, "max_points": 15,
+            "reason": str(profile.get("audience") or "Not classified"),
+        })
+
+    size_target = str(workspace.get("company_size") or "").strip()
+    if size_target:
+        possible += 15
+        wanted = _range(size_target)
+        actual_text = str(profile.get("team_size_public") or "").strip()
+        actual = _range(actual_text)
+        points = 15 if wanted and actual and _ranges_overlap(wanted, actual) else 0
+        earned += points
+        if points:
+            matched.append(f"Size · {actual_text}")
+        elif not actual:
+            gaps.append("Company size is unknown, so no size-match points were awarded.")
+        else:
+            gaps.append(f"Verified company size ({actual_text}) does not match {size_target}.")
+        components.append({
+            "label": "Company size", "points": points, "max_points": 15,
+            "reason": actual_text or "No public team-size evidence.",
+        })
 
     keywords = _parts(workspace.get("keywords") or "")
     if keywords:
-        possible += 15
-        hits = [x for x in keywords if x in hay or any(w in hay for w in _words(x) if len(w) >= 3)]
-        points = min(15, 7 + 4 * len(hits)) if hits else 0
+        possible += 10
+        hits: list[str] = []
+        for keyword in keywords:
+            if keyword in description_hay:
+                hits.append(keyword)
+                continue
+            words = [w for w in _words(keyword) if len(w) >= 4]
+            if words and all(w in description_hay for w in words):
+                hits.append(keyword)
+        hits = list(dict.fromkeys(hits))
+        points = 10 if len(hits) >= 2 else 5 if len(hits) == 1 else 0
         earned += points
         if hits:
             matched.append("Keywords · " + ", ".join(hits[:2]))
-        components.append({"label": "Keywords", "points": points, "max_points": 15, "reason": ", ".join(hits[:4]) if hits else "No keyword match in the basic profile."})
-
-    if str(workspace.get("company_size") or "").strip():
-        gaps.append("Company size is not scored until public size evidence is available.")
+        components.append({
+            "label": "Keywords", "points": points, "max_points": 10,
+            "reason": ", ".join(hits[:4]) if hits else "No specific workspace keyword is supported by the basic profile.",
+        })
 
     score = round(earned / possible * 100) if possible else 50
-    label = "Strong profile match" if score >= 70 else "Possible profile match" if score >= 45 else "Low profile match"
+    if score >= 85:
+        label = "Excellent profile match"
+    elif score >= 70:
+        label = "Strong profile match"
+    elif score >= 55:
+        label = "Good profile match"
+    elif score >= 40:
+        label = "Possible profile match"
+    else:
+        label = "Low profile match"
+
+    # Best-match status requires actual category evidence when a category was configured.
+    if industry_value:
+        best_match = industry_points >= 24 and score >= 55
+    else:
+        best_match = score >= 60
+
     return {
         "score": max(0, min(100, score)),
         "label": label,
-        "matched": matched[:4],
-        "gaps": gaps,
+        "matched": matched[:5],
+        "gaps": gaps[:5],
         "components": components,
+        "tier": "best" if best_match else "broader",
+        "industry_points": industry_points,
     }
 
 
@@ -147,35 +252,51 @@ def _workspace_decision(profile: dict[str, Any], match: dict[str, Any], workspac
     }
 
 
+def _attach_size(profile: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+    profile["team_size_public"] = str(row.get("team_size_public") or "").strip()
+    return profile
+
+
 def discover_for_workspace(workspace_id: str, q: str = "", limit: int = 60, page: int = 1) -> dict[str, Any] | None:
     workspace = get_workspace(workspace_id)
     if not workspace:
         return None
     icp = get_icp()
     selected = set(int(x) for x in workspace.get("selected_ids") or [])
-    items: list[dict[str, Any]] = []
+    best: list[dict[str, Any]] = []
+    broader: list[dict[str, Any]] = []
+
     for row in search_universe(workspace, q=q, scan_limit=1800):
-        profile = basic_company_profile(row, icp)
+        profile = _attach_size(basic_company_profile(row, icp), row)
         match = profile_match(profile, workspace)
         profile["profile_match"] = match
         profile["selected"] = int(profile.get("id") or 0) in selected
         profile["universe_source"] = str(row.get("seed_source") or row.get("data_origin") or "public data")
-        # Keep manually selected accounts visible; otherwise suppress clearly weak basic matches.
-        if profile["selected"] or int(match.get("score") or 0) >= 35:
-            items.append(profile)
-    items.sort(key=lambda x: (
+        profile["match_tier"] = match.get("tier") or "broader"
+        score = int(match.get("score") or 0)
+        if profile["match_tier"] == "best":
+            best.append(profile)
+        elif score >= 30 or profile["selected"]:
+            broader.append(profile)
+
+    sorter = lambda x: (
         -int((x.get("profile_match") or {}).get("score") or 0),
         -int(x.get("completeness") or 0),
         str(x.get("company") or "").lower(),
-    ))
-    total = len(items)
+    )
+    best.sort(key=sorter)
+    broader.sort(key=sorter)
+
+    total = len(best)
     limit = max(10, min(int(limit), 120))
     page = max(1, int(page))
     start = (page - 1) * limit
     return {
         "workspace": {k: v for k, v in workspace.items() if k != "company_results"},
-        "items": items[start:start + limit],
+        "items": best[start:start + limit],
+        "broader_items": broader[:12] if page == 1 else [],
         "total_candidates": total,
+        "broader_candidates": len(broader),
         "page": page,
         "page_size": limit,
         "pages": max(1, (total + limit - 1) // limit),
@@ -189,7 +310,7 @@ def selected_profiles(workspace: dict[str, Any]) -> list[dict[str, Any]]:
         row = get_company(int(cid))
         if not row:
             continue
-        profile = full_company_profile(row, icp)
+        profile = _attach_size(full_company_profile(row, icp), row)
         match = profile_match(profile, workspace)
         workspace_result = get_workspace_result(str(workspace.get("id") or ""), int(cid))
         profile["profile_match"] = match
@@ -215,6 +336,8 @@ def workspace_detail(workspace_id: str) -> dict[str, Any] | None:
         return None
     selected = selected_profiles(workspace)
     waiting = [x for x in selected if (x.get("decision") or {}).get("decision") in {"RESEARCH", "SOURCE NEEDED"}]
+    source_issues = [x for x in waiting if (x.get("decision") or {}).get("decision") == "SOURCE NEEDED"]
+    ready = [x for x in waiting if (x.get("decision") or {}).get("decision") == "RESEARCH"]
     researched = [x for x in selected if bool(x.get("workspace_intelligence")) and (x.get("decision") or {}).get("decision") != "SOURCE NEEDED"]
     recommended = [x for x in researched if (x.get("decision") or {}).get("decision") == "CONTACT"]
     monitor = [x for x in researched if (x.get("decision") or {}).get("decision") == "MONITOR"]
@@ -227,12 +350,16 @@ def workspace_detail(workspace_id: str) -> dict[str, Any] | None:
             "selected": len(selected),
             "researched": len(researched),
             "waiting": len(waiting),
+            "ready": len(ready),
+            "source_issues": len(source_issues),
             "recommended": len(recommended),
             "monitor": len(monitor),
             "skip": len(skipped),
         },
         "selected": selected,
         "waiting": waiting,
+        "ready": ready,
+        "source_issues": source_issues,
         "researched": researched,
         "recommended": recommended,
         "monitor": monitor,
@@ -247,7 +374,7 @@ def workspace_company_context(workspace_id: str, company_id: int) -> dict[str, A
     if not workspace or not row or int(company_id) not in {int(x) for x in workspace.get("selected_ids") or []}:
         return None
     icp = get_icp()
-    profile = full_company_profile(row, icp)
+    profile = _attach_size(full_company_profile(row, icp), row)
     match = profile_match(profile, workspace)
     result = get_workspace_result(workspace_id, company_id)
     return {
