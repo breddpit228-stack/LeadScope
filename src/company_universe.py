@@ -74,17 +74,9 @@ def _quality_order() -> str:
         updated_at DESC"""
 
 
-def search_universe(workspace: dict[str, Any], q: str = "", scan_limit: int = 1600) -> list[dict[str, Any]]:
-    """Return a bounded candidate pool using SQLite first, before Python scoring.
-
-    This is intentionally a retrieval layer, not a fit scorer. It keeps Discover fast
-    when the local universe grows beyond the original seed dataset.
-    """
-    scan_limit = max(50, min(int(scan_limit), 3000))
-    groups: list[str] = ["website<>''"]
+def _region_filter(region: str) -> tuple[list[str], list[Any]]:
+    groups: list[str] = []
     params: list[Any] = []
-
-    region = str(workspace.get("region") or "").strip()
     if region and region.lower() not in {"europe", "eu", "european union"}:
         regions = _parts(region)
         if regions:
@@ -94,50 +86,77 @@ def search_universe(workspace: dict[str, Any], q: str = "", scan_limit: int = 16
         countries = sorted(EUROPE_COUNTRIES)
         groups.append("(" + " OR ".join(["country=?" for _ in countries]) + ")")
         params.extend(countries)
+    return groups, params
 
+
+def _query_rows(groups: list[str], params: list[Any], limit: int) -> list[dict[str, Any]]:
+    sql = "SELECT * FROM companies WHERE " + " AND ".join(groups)
+    sql += " ORDER BY " + _quality_order() + " LIMIT ?"
+    with _connect() as conn:
+        return [dict(r) for r in conn.execute(sql, [*params, int(limit)]).fetchall()]
+
+
+def search_universe(workspace: dict[str, Any], q: str = "", scan_limit: int = 1600) -> list[dict[str, Any]]:
+    """Return a broad candidate pool before Python/evidence scoring.
+
+    Discover must not depend entirely on pre-existing taxonomy. We first retrieve
+    industry-likely rows, then supplement them with a bounded regional pool so companies
+    with sparse/incorrect category metadata can still be evaluated from their description.
+    The strict matcher decides Strong vs Broader afterwards.
+    """
+    scan_limit = max(50, min(int(scan_limit), 4000))
+    region = str(workspace.get("region") or "").strip()
     industry = str(workspace.get("industry") or "").strip()
     industry_terms = _aliases(industry)
+    q_value = q.strip()
+
+    base_groups = ["website<>''"]
+    base_params: list[Any] = []
+    region_groups, region_params = _region_filter(region)
+    base_groups.extend(region_groups)
+    base_params.extend(region_params)
+
+    # User search is intentionally narrow: do not mix unrelated regional rows into a
+    # named-company query.
+    if q_value:
+        term = f"%{q_value}%"
+        fields = ["company", "website", "segment", "company_summary", "public_signals", "seed_tags_json"]
+        search_groups = [*base_groups, "(" + " OR ".join([f"{field} LIKE ?" for field in fields]) + ")"]
+        search_params = [*base_params, *([term] * len(fields))]
+        return _query_rows(search_groups, search_params, scan_limit)
+
+    # Keep room for regional discovery even when taxonomy already returns hundreds of
+    # rows. Specific-country workspaces get a larger regional supplement because the
+    # pool is naturally bounded and this is where sparse taxonomy hurts most.
+    specific_region = bool(region and region.lower() not in {"europe", "eu", "european union"})
+    if industry_terms:
+        primary_budget = min(scan_limit, 900 if specific_region else max(700, int(scan_limit * 0.72)))
+    else:
+        primary_budget = scan_limit
+
+    primary_groups = list(base_groups)
+    primary_params = list(base_params)
     if industry_terms:
         fields = ["segment", "business_type", "company_summary", "public_signals", "seed_tags_json"]
         clauses: list[str] = []
         for term in industry_terms:
             clauses.append("(" + " OR ".join([f"{field} LIKE ?" for field in fields]) + ")")
-            params.extend([f"%{term}%"] * len(fields))
-        groups.append("(" + " OR ".join(clauses) + ")")
+            primary_params.extend([f"%{term}%"] * len(fields))
+        primary_groups.append("(" + " OR ".join(clauses) + ")")
 
-    if q.strip():
-        term = f"%{q.strip()}%"
-        fields = ["company", "website", "segment", "company_summary", "public_signals", "seed_tags_json"]
-        groups.append("(" + " OR ".join([f"{field} LIKE ?" for field in fields]) + ")")
-        params.extend([term] * len(fields))
+    rows = _query_rows(primary_groups, primary_params, primary_budget)
 
-    sql = "SELECT * FROM companies WHERE " + " AND ".join(groups)
-    sql += " ORDER BY " + _quality_order() + " LIMIT ?"
-    params.append(scan_limit)
-    with _connect() as conn:
-        rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
-
-    # If taxonomy fields are still sparse, fall back to a bounded regional/general pool
-    # rather than returning an empty Discover screen. These rows are later classified as
-    # broader candidates by the profile matcher, so they do not inflate Matches.
-    if len(rows) < 40 and industry_terms:
-        fallback_groups = ["website<>''"]
-        fallback_params: list[Any] = []
-        if region and region.lower() not in {"europe", "eu", "european union"}:
-            regions = _parts(region)
-            if regions:
-                fallback_groups.append("(" + " OR ".join(["country LIKE ?" for _ in regions]) + ")")
-                fallback_params.extend([f"%{x}%" for x in regions])
-        if q.strip():
-            term = f"%{q.strip()}%"
-            fallback_groups.append("(company LIKE ? OR website LIKE ? OR segment LIKE ? OR company_summary LIKE ? OR public_signals LIKE ?)")
-            fallback_params.extend([term] * 5)
-        sql = "SELECT * FROM companies WHERE " + " AND ".join(fallback_groups) + " ORDER BY " + _quality_order() + " LIMIT ?"
-        fallback_params.append(min(scan_limit, 900))
-        with _connect() as conn:
-            fallback = [dict(r) for r in conn.execute(sql, fallback_params).fetchall()]
+    # Always supplement industry searches with a broader regional pool. This avoids the
+    # old failure mode where 40+ noisy taxonomy rows prevented fallback and hid real
+    # candidates whose category field was empty or wrong.
+    if industry_terms and len(rows) < scan_limit:
+        supplement_budget = scan_limit - len(rows)
+        if not specific_region:
+            supplement_budget = min(supplement_budget, 650)
+        supplement = _query_rows(base_groups, base_params, supplement_budget)
         seen = {int(x.get("id") or 0) for x in rows}
-        rows.extend(x for x in fallback if int(x.get("id") or 0) not in seen)
+        rows.extend(x for x in supplement if int(x.get("id") or 0) not in seen)
+
     return rows[:scan_limit]
 
 
@@ -159,8 +178,10 @@ def universe_stats() -> dict[str, Any]:
         ).fetchall()
     sources = [{"source": str(r[0] or "unknown"), "count": int(r[1] or 0)} for r in source_rows]
     categories = [{"category": str(r[0] or "unknown"), "count": int(r[1] or 0)} for r in category_rows]
+
     def pct(value: int) -> int:
         return round((value / total) * 100) if total else 0
+
     return {
         "total": total,
         "with_website": websites,
