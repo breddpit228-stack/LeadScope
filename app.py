@@ -14,8 +14,8 @@ from src.data_engine import summarize_library
 from src.data_engine_ext import company_profile
 from src.identity_resolver import resolve_company_identity
 from src.library_sources import fetch_wikidata_europe_companies
+from src.universe_merge import merge_company_items
 from src.storage import (
-    bulk_import_seed,
     company_count,
     dashboard_stats,
     get_company,
@@ -26,7 +26,7 @@ from src.workspace_state import ensure_workspace_initialized, remove_workspace_a
 
 ROOT = Path(__file__).resolve().parent
 app = _core.app
-app.version = "6.5"
+app.version = "7.9"
 
 
 def _read(name: str) -> str:
@@ -34,48 +34,53 @@ def _read(name: str) -> str:
     return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
-_LIBRARY_EXPAND = {"status": "idle", "target": 10000, "added": 0, "checked": 0, "message": ""}
+_LIBRARY_EXPAND = {"status": "idle", "target": 10000, "added": 0, "updated": 0, "checked": 0, "message": ""}
 _LIBRARY_EXPAND_LOCK = threading.Lock()
 
 
 def _library_expand_worker(target: int = 10000) -> None:
     target = max(1000, min(int(target), 10000))
     with _LIBRARY_EXPAND_LOCK:
-        _LIBRARY_EXPAND.update(status="running", target=target, message="Indexing public European companies…")
+        _LIBRARY_EXPAND.update(status="running", target=target, message="Indexing and enriching public European companies…")
     offset = 0
     batch_size = 250
     total_added = 0
+    total_updated = 0
     try:
         while company_count() < target and offset < 30000:
             items = fetch_wikidata_europe_companies(limit=batch_size, offset=offset)
             if not items:
                 break
-            result = bulk_import_seed(
+            result = merge_company_items(
                 items,
                 limit=max(0, target - company_count()),
                 source_name="Wikidata · European businesses with official websites",
             )
             total_added += int(result.get("added") or 0)
+            total_updated += int(result.get("updated") or 0)
             offset += batch_size
             with _LIBRARY_EXPAND_LOCK:
                 _LIBRARY_EXPAND.update(
                     added=total_added,
+                    updated=total_updated,
                     checked=offset,
-                    message=f"{company_count()} companies indexed · checking public source batch {offset // batch_size}",
+                    message=f"{company_count()} companies indexed · {total_updated} existing profiles enriched · batch {offset // batch_size}",
                 )
             time.sleep(0.8)
         with _LIBRARY_EXPAND_LOCK:
             _LIBRARY_EXPAND.update(
                 status="done",
                 added=total_added,
+                updated=total_updated,
                 checked=offset,
-                message=f"Library now contains {company_count()} companies",
+                message=f"Company Universe contains {company_count()} companies · {total_updated} existing profiles enriched",
             )
     except Exception as exc:
         with _LIBRARY_EXPAND_LOCK:
             _LIBRARY_EXPAND.update(
                 status="error",
                 added=total_added,
+                updated=total_updated,
                 checked=offset,
                 message=f"Library expansion paused: {type(exc).__name__}: {str(exc)[:240]}",
             )
@@ -91,8 +96,9 @@ def api_library_expand(target: int = 10000):
             status="starting",
             target=target,
             added=0,
+            updated=0,
             checked=0,
-            message="Starting public company indexing…",
+            message="Starting public company indexing and enrichment…",
         )
     threading.Thread(target=_library_expand_worker, args=(target,), daemon=True, name="library-expand").start()
     return {"status": "starting", "target": target}
