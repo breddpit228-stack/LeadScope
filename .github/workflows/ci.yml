@@ -26,13 +26,14 @@ jobs:
         run: |
           python -m py_compile app.py app_core.py
           python -m py_compile src/*.py
-          python -m py_compile test_universe_merge.py test_cordis_source.py
+          python -m py_compile test_universe_merge.py test_cordis_source.py test_workspace_match_strict.py
 
       - name: Run backend tests
         run: |
           python run_tests.py
           python test_universe_merge.py
           python test_cordis_source.py
+          python test_workspace_match_strict.py
 
       - name: Runtime API smoke test
         run: |
@@ -55,7 +56,7 @@ jobs:
           print('LeadScope runtime smoke test OK · version', app.app.version)
           PY
 
-      - name: Workspace v7.7 flow smoke test
+      - name: Workspace v7.12 flow smoke test
         run: |
           python - <<'PY'
           import app
@@ -98,22 +99,34 @@ jobs:
               assert 'ready' in state and 'source_issues' in state and 'potential' in state
               ctx = context(ws['id'], cid)
               assert ctx['company_id'] == cid and 'profile_match' in ctx and 'decision' in ctx
+              assert 'requirements' in ctx['profile_match']
 
           strong = profile_match({
               'company_type':'Fintech','category':'Fintech','audience':'B2B',
-              'description':'Payments and payroll software for businesses',
-              'country':'Poland','city':'Warsaw','team_size_public':''
-          }, ws_payload)
-          assert 70 <= strong['score'] < 100, strong
+              'description':'A payment platform and payroll software for businesses and finance teams',
+              'country':'Poland','city':'Warsaw','team_size_public':'100'
+          }, ws_payload, {'team_size_public':'100'})
+          assert strong['score'] >= 70, strong
           assert strong['tier'] == 'best', strong
+          assert strong['required_complete'] is True, strong
           assert strong['industry_relation']['kind'] == 'primary', strong
+
+          incomplete = profile_match({
+              'company_type':'Fintech','category':'Fintech','audience':'B2B',
+              'description':'A payment platform and payroll software for businesses',
+              'country':'Poland','city':'Warsaw','team_size_public':''
+          }, ws_payload, {})
+          assert incomplete['tier'] == 'broader', incomplete
+          assert incomplete['score'] <= 69, incomplete
+          assert incomplete['unknown_required'] >= 1, incomplete
+          assert 'Company size ?' in incomplete['matched'], incomplete
 
           service_profile={
               'company_type':'Fintech','category':'Fintech','audience':'B2B',
               'description':'A software development house building custom products for clients across industries including fintech and retail.',
-              'country':'Poland','city':'Warsaw','team_size_public':''
+              'country':'Poland','city':'Warsaw','team_size_public':'100'
           }
-          service_row={'segment':'Fintech','business_type':'','seed_tags_json':'["fintech","software"]'}
+          service_row={'segment':'Fintech','business_type':'','seed_tags_json':'["fintech","software"]','team_size_public':'100'}
           service = profile_match(service_profile, ws_payload, service_row)
           assert service['industry_relation']['kind'] == 'serves', service
           assert service['industry_points'] <= 8, service
@@ -131,7 +144,7 @@ jobs:
           assert b'Selected companies' not in asset.body
           assert b'Broader candidates' in v73.body and b'Company Universe' in v73.body and b'Workspace fit' in v73.body
           assert remove(ws['id'])['ok'] is True
-          print('Workspace v7.7 flow OK')
+          print('Workspace v7.12 flow OK')
           PY
 
       - name: Check JavaScript syntax
