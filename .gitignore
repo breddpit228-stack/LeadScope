@@ -3,4 +3,5 @@
 __pycache__/
 *.pyc
 data/lead_studio.db
+data/company_universe_index_state.json
 .DS_Store
