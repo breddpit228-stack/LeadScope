@@ -10,10 +10,10 @@ import requests
 
 ROOT = Path(__file__).resolve().parents[1]
 WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
-USER_AGENT = "LeadScope/7.8 (public company-universe indexing; https://github.com/breddpit228-stack/LeadScope)"
+USER_AGENT = "LeadScope/7.10 (public company-universe indexing; https://github.com/breddpit228-stack/LeadScope)"
 _TRANSIENT_STATUS = {429, 500, 502, 503, 504}
 _CURSOR_PATH = ROOT / "data" / "company_universe_index_state.json"
-_CURSOR_VERSION = 3
+_CURSOR_VERSION = 4
 
 # Ordered roughly by expected company-data density so a fresh installation becomes useful
 # quickly. Country-sharded queries are cheaper and more reliable than scanning all Europe.
@@ -37,8 +37,12 @@ EUROPE_WIKIDATA_COUNTRIES: list[tuple[str, str]] = [
 ]
 
 
-def _wikidata_request(query: str, timeout: int, retries: int = 4) -> dict[str, Any]:
-    """Run a bounded public Wikidata query with polite transient-error retries."""
+def _wikidata_request(query: str, timeout: int, retries: int = 2) -> dict[str, Any]:
+    """Run a bounded public Wikidata query with short transient-error retries.
+
+    The indexer is best-effort. A single slow public SPARQL shard must never make the
+    whole local product appear frozen for minutes.
+    """
     last_error: Exception | None = None
     for attempt in range(max(1, retries)):
         try:
@@ -50,11 +54,11 @@ def _wikidata_request(query: str, timeout: int, retries: int = 4) -> dict[str, A
                     "Accept-Encoding": "gzip, deflate",
                     "User-Agent": USER_AGENT,
                 },
-                timeout=max(8, int(timeout)),
+                timeout=max(6, int(timeout)),
             )
             if response.status_code in _TRANSIENT_STATUS:
                 retry_after = response.headers.get("Retry-After")
-                delay = min(18.0, float(retry_after)) if retry_after and str(retry_after).isdigit() else min(14.0, (1.7 ** attempt) + random.uniform(0.2, 0.9))
+                delay = min(6.0, float(retry_after)) if retry_after and str(retry_after).isdigit() else min(5.0, (1.5 ** attempt) + random.uniform(0.1, 0.5))
                 last_error = requests.HTTPError(f"Wikidata temporary HTTP {response.status_code}")
                 if attempt < retries - 1:
                     time.sleep(delay)
@@ -65,7 +69,7 @@ def _wikidata_request(query: str, timeout: int, retries: int = 4) -> dict[str, A
             last_error = exc
             if attempt >= retries - 1:
                 break
-            time.sleep(min(12.0, (1.8 ** attempt) + random.uniform(0.2, 0.8)))
+            time.sleep(min(4.0, (1.6 ** attempt) + random.uniform(0.1, 0.4)))
     if last_error:
         raise last_error
     raise RuntimeError("Wikidata returned no usable response")
@@ -82,13 +86,13 @@ def _clean_number(value: str) -> str:
 def fetch_wikidata_country_batch(
     country_qid: str,
     country_name: str,
-    limit: int = 150,
+    limit: int = 100,
     offset: int = 0,
-    timeout: int = 26,
+    timeout: int = 12,
     include_subclasses: bool = False,
 ) -> dict[str, Any]:
     """Fetch one small country-sharded Wikidata company batch."""
-    limit = max(1, min(int(limit), 250))
+    limit = max(1, min(int(limit), 150))
     offset = max(0, int(offset))
     qid = str(country_qid or "").strip()
     if not qid.startswith("Q") or not qid[1:].isdigit():
@@ -115,7 +119,7 @@ def fetch_wikidata_country_batch(
     LIMIT {limit}
     OFFSET {offset}'''
 
-    payload = _wikidata_request(query, timeout=timeout, retries=4)
+    payload = _wikidata_request(query, timeout=timeout, retries=2)
     bindings = payload.get("results", {}).get("bindings", [])
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -150,29 +154,45 @@ def fetch_wikidata_country_batch(
 def fetch_wikidata_country_companies(
     country_qid: str,
     country_name: str,
-    limit: int = 150,
+    limit: int = 100,
     offset: int = 0,
-    timeout: int = 26,
+    timeout: int = 12,
     include_subclasses: bool = False,
 ) -> list[dict[str, Any]]:
     return list(fetch_wikidata_country_batch(country_qid, country_name, limit, offset, timeout, include_subclasses).get("items") or [])
 
 
 def _default_cursor() -> dict[str, Any]:
-    return {"version": _CURSOR_VERSION, "phase": "direct", "country_index": 0, "offset": 0, "checked": 0, "complete": False}
+    return {
+        "version": _CURSOR_VERSION,
+        "phase": "direct",
+        "country_index": 0,
+        "offset": 0,
+        "checked": 0,
+        "complete": False,
+        "skipped_shards": [],
+        "last_error": "",
+    }
 
 
 def _load_cursor() -> dict[str, Any]:
     try:
         value = json.loads(_CURSOR_PATH.read_text(encoding="utf-8"))
-        if isinstance(value, dict) and int(value.get("version") or 0) == _CURSOR_VERSION:
-            return {**_default_cursor(), **value}
+        if isinstance(value, dict):
+            # Preserve progress when moving from the older cursor format instead of
+            # silently sending the user back to the first UK batch.
+            base = _default_cursor()
+            for key in ("phase", "country_index", "offset", "checked", "complete", "skipped_shards", "last_error"):
+                if key in value:
+                    base[key] = value[key]
+            return base
     except Exception:
         pass
     return _default_cursor()
 
 
 def _save_cursor(state: dict[str, Any]) -> None:
+    state["version"] = _CURSOR_VERSION
     _CURSOR_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = _CURSOR_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -196,17 +216,19 @@ def company_universe_cursor_status() -> dict[str, Any]:
     return {**state, "country": EUROPE_WIKIDATA_COUNTRIES[idx][0] if EUROPE_WIKIDATA_COUNTRIES else ""}
 
 
-def fetch_wikidata_europe_companies(limit: int = 150, offset: int = 0, timeout: int = 28) -> list[dict[str, Any]]:
+def fetch_wikidata_europe_companies(limit: int = 100, offset: int = 0, timeout: int = 12) -> list[dict[str, Any]]:
     """Return the next resumable Company Universe batch.
 
-    `offset` is retained for API compatibility with the older worker. The real cursor is
-    persisted under data/, so a LeadScope restart continues rather than rescanning UK page 1.
+    Public SPARQL is allowed to be flaky. After the bounded request retries are exhausted,
+    LeadScope records that shard and advances instead of freezing the entire local indexer.
+    `offset` remains only for compatibility with the worker; the persisted cursor is real.
     """
     del offset
-    limit = max(1, min(int(limit), 250))
+    limit = max(1, min(int(limit), 150))
     state = _load_cursor()
     attempts = 0
-    while not state.get("complete") and attempts < len(EUROPE_WIKIDATA_COUNTRIES) * 2 + 2:
+    max_attempts = len(EUROPE_WIKIDATA_COUNTRIES) * 2 + 2
+    while not state.get("complete") and attempts < max_attempts:
         attempts += 1
         idx = int(state.get("country_index") or 0)
         if idx >= len(EUROPE_WIKIDATA_COUNTRIES):
@@ -215,15 +237,32 @@ def fetch_wikidata_europe_companies(limit: int = 150, offset: int = 0, timeout: 
             continue
         country_name, country_qid = EUROPE_WIKIDATA_COUNTRIES[idx]
         current_offset = max(0, int(state.get("offset") or 0))
-        batch = fetch_wikidata_country_batch(
-            country_qid=country_qid,
-            country_name=country_name,
-            limit=limit,
-            offset=current_offset,
-            timeout=timeout,
-            include_subclasses=state.get("phase") == "subclasses",
-        )
+        try:
+            batch = fetch_wikidata_country_batch(
+                country_qid=country_qid,
+                country_name=country_name,
+                limit=limit,
+                offset=current_offset,
+                timeout=timeout,
+                include_subclasses=state.get("phase") == "subclasses",
+            )
+        except (requests.Timeout, requests.ConnectionError, requests.HTTPError, ValueError) as exc:
+            shard = f"{state.get('phase','direct')}:{country_name}:{current_offset}"
+            skipped = list(state.get("skipped_shards") or [])
+            if shard not in skipped:
+                skipped.append(shard)
+            state["skipped_shards"] = skipped[-100:]
+            state["last_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+            # The request has already exhausted its own retries, so defer this shard and
+            # move on. Missing one page is better than blocking every other country.
+            state["offset"] = current_offset + limit
+            if current_offset >= 12000:
+                _advance_cursor(state)
+            _save_cursor(state)
+            continue
+
         raw_count = int(batch.get("raw_count") or 0)
+        state["last_error"] = ""
         state["checked"] = int(state.get("checked") or 0) + raw_count
         state["offset"] = current_offset + limit
         if raw_count == 0 or raw_count < limit or current_offset >= 12000:
