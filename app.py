@@ -300,6 +300,7 @@ _extra_js = "\n".join([
     _read("identity_v63.js"),
     _read("performance_v64.js"),
     _read("research_controller_v65.js"),
+    _read("workspace_state_v77.js"),
 ])
 
 _core.HTML = _core.HTML.replace("</style>", _extra_css + "\n</style>").replace(
