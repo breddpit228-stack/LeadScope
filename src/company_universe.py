@@ -65,6 +65,15 @@ def _aliases(industry: str) -> list[str]:
     return values[:10]
 
 
+def _quality_order() -> str:
+    return """CASE WHEN quality_status<>'' THEN 0 ELSE 1 END,
+        CASE WHEN segment<>'' OR business_type<>'' THEN 0 ELSE 1 END,
+        CASE WHEN company_summary<>'' OR public_signals<>'' THEN 0 ELSE 1 END,
+        CASE WHEN country<>'' THEN 0 ELSE 1 END,
+        CASE WHEN team_size_public<>'' THEN 0 ELSE 1 END,
+        updated_at DESC"""
+
+
 def search_universe(workspace: dict[str, Any], q: str = "", scan_limit: int = 1600) -> list[dict[str, Any]]:
     """Return a bounded candidate pool using SQLite first, before Python scoring.
 
@@ -103,13 +112,14 @@ def search_universe(workspace: dict[str, Any], q: str = "", scan_limit: int = 16
         params.extend([term] * len(fields))
 
     sql = "SELECT * FROM companies WHERE " + " AND ".join(groups)
-    sql += " ORDER BY CASE WHEN quality_status<>'' THEN 0 ELSE 1 END, updated_at DESC LIMIT ?"
+    sql += " ORDER BY " + _quality_order() + " LIMIT ?"
     params.append(scan_limit)
     with _connect() as conn:
         rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
 
     # If taxonomy fields are still sparse, fall back to a bounded regional/general pool
-    # rather than returning an empty Discover screen.
+    # rather than returning an empty Discover screen. These rows are later classified as
+    # broader candidates by the profile matcher, so they do not inflate Matches.
     if len(rows) < 40 and industry_terms:
         fallback_groups = ["website<>''"]
         fallback_params: list[Any] = []
@@ -122,7 +132,7 @@ def search_universe(workspace: dict[str, Any], q: str = "", scan_limit: int = 16
             term = f"%{q.strip()}%"
             fallback_groups.append("(company LIKE ? OR website LIKE ? OR segment LIKE ? OR company_summary LIKE ? OR public_signals LIKE ?)")
             fallback_params.extend([term] * 5)
-        sql = "SELECT * FROM companies WHERE " + " AND ".join(fallback_groups) + " ORDER BY updated_at DESC LIMIT ?"
+        sql = "SELECT * FROM companies WHERE " + " AND ".join(fallback_groups) + " ORDER BY " + _quality_order() + " LIMIT ?"
         fallback_params.append(min(scan_limit, 900))
         with _connect() as conn:
             fallback = [dict(r) for r in conn.execute(sql, fallback_params).fetchall()]
@@ -137,16 +147,36 @@ def universe_stats() -> dict[str, Any]:
         websites = int(conn.execute("SELECT COUNT(*) FROM companies WHERE website<>''").fetchone()[0])
         researched = int(conn.execute("SELECT COUNT(*) FROM companies WHERE quality_status<>''").fetchone()[0])
         described = int(conn.execute("SELECT COUNT(*) FROM companies WHERE company_summary<>'' OR public_signals<>''").fetchone()[0])
+        categorized = int(conn.execute("SELECT COUNT(*) FROM companies WHERE segment<>'' OR business_type<>''").fetchone()[0])
+        sized = int(conn.execute("SELECT COUNT(*) FROM companies WHERE team_size_public<>''").fetchone()[0])
+        located = int(conn.execute("SELECT COUNT(*) FROM companies WHERE country<>''").fetchone()[0])
         countries = int(conn.execute("SELECT COUNT(DISTINCT country) FROM companies WHERE country<>''").fetchone()[0])
         source_rows = conn.execute(
             "SELECT COALESCE(NULLIF(seed_source,''), data_origin) source, COUNT(*) n FROM companies GROUP BY source ORDER BY n DESC LIMIT 12"
         ).fetchall()
+        category_rows = conn.execute(
+            "SELECT segment, COUNT(*) n FROM companies WHERE segment<>'' GROUP BY segment ORDER BY n DESC LIMIT 12"
+        ).fetchall()
     sources = [{"source": str(r[0] or "unknown"), "count": int(r[1] or 0)} for r in source_rows]
+    categories = [{"category": str(r[0] or "unknown"), "count": int(r[1] or 0)} for r in category_rows]
+    def pct(value: int) -> int:
+        return round((value / total) * 100) if total else 0
     return {
         "total": total,
         "with_website": websites,
         "with_description": described,
+        "with_category": categorized,
+        "with_team_size": sized,
+        "with_country": located,
         "researched": researched,
         "countries": countries,
+        "coverage": {
+            "website": pct(websites),
+            "description": pct(described),
+            "category": pct(categorized),
+            "team_size": pct(sized),
+            "country": pct(located),
+        },
         "sources": sources,
+        "categories": categories,
     }
