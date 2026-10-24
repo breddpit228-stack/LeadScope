@@ -12,9 +12,22 @@ const SIZES=['1–10','11–50','51–200','201–500','501–1000','1001–5000
 let activeContext=null;
 let activeCompanyId=null;
 let activeWorkspaceId=null;
+let discoverPage=1;
+let discoverQuery='';
+let universeStats=null;
 
 function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
+function shortSource(v){
+  const text=String(v||'public data');
+  if(/wikidata/i.test(text))return 'Wikidata';
+  if(/accelerator/i.test(text))return 'Public startup data';
+  if(/legacy_seed/i.test(text))return 'LeadScope seed';
+  if(/manual/i.test(text))return 'Manual';
+  return text.length>34?text.slice(0,31)+'…':text;
+}
+function qualityLabel(p){const n=Number(p.completeness||0);return n>=70?'Good':n>=50?'Partial':'Basic'}
+function qualityClass(p){const n=Number(p.completeness||0);return n>=70?'good':n>=50?'warn':'neutral'}
 
 function replaceInputWithSelect(id,values,placeholder){
   const el=document.getElementById(id);if(!el||el.tagName==='SELECT')return el;
@@ -37,6 +50,11 @@ async function fetchContext(workspaceId,companyId){
   const r=await fetch(`/api/workspaces/${workspaceId}/companies/${companyId}/context`);
   if(!r.ok)return null;
   return await r.json();
+}
+async function getUniverseStats(){
+  if(universeStats)return universeStats;
+  try{const r=await fetch('/api/company-universe/stats');if(r.ok)universeStats=await r.json()}catch(e){}
+  return universeStats||{};
 }
 
 function metricRows(items){
@@ -87,15 +105,41 @@ function applyContext(){
   if(refresh){refresh.textContent='Refresh workspace research';refresh.onclick=()=>refreshWorkspaceCompany();}
 }
 
-async function decorateDiscover(){
-  const search=document.querySelector('#v7DiscoverSearch');if(!search)return;
-  if(document.querySelector('.v73UniverseBar'))return;
+function discoverEmpty(title,text){return `<div class="v7EmptyInline"><h3>${esc(title)}</h3><p>${esc(text)}</p></div>`}
+async function renderV73Discover(page=discoverPage,q=discoverQuery){
+  if(!activeWorkspaceId)return;
+  discoverPage=Math.max(1,Number(page)||1);discoverQuery=String(q||'').trim();
+  const body=document.querySelector('#v7TabBody');if(!body)return;
+  const stats=await getUniverseStats();
+  const sourceText=(stats.sources||[]).slice(0,3).map(x=>`${shortSource(x.source)} ${Number(x.count||0).toLocaleString()}`).join(' · ')||'Public company sources';
+  body.innerHTML=`<div class="v73UniverseBar"><div><strong>Company Universe</strong><span>${Number(stats.total||0).toLocaleString()} indexed · ${Number(stats.with_website||0).toLocaleString()} with websites · ${Number(stats.with_description||0).toLocaleString()} described</span></div><small>${esc(sourceText)}</small></div><div class="v7DiscoverBar"><input id="v7DiscoverSearch" placeholder="Search within this market…" value="${esc(discoverQuery)}"><button class="secondary" onclick="runV7DiscoverSearch()">Search</button></div><div class="v7Hint">Discover searches LeadScope's local Company Universe. Profile match is based on the workspace criteria and basic public company data — it is not the deep research Fit score.</div><div class="v7CompanyList"><div class="v7EmptyInline">Finding matching companies…</div></div><div id="v73Pager"></div>`;
+  const input=document.getElementById('v7DiscoverSearch');
+  let timer=null;input?.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(()=>renderV73Discover(1,input.value),450)});
   try{
-    const r=await fetch('/api/company-universe/stats');if(!r.ok)return;const s=await r.json();
-    const sources=(s.sources||[]).slice(0,3).map(x=>String(x.source||'').replace('Wikidata · European businesses with official websites','Wikidata')).join(' · ');
-    search.closest('.v7DiscoverBar')?.insertAdjacentHTML('beforebegin',`<div class="v73UniverseBar"><div><strong>Company Universe</strong><span>${Number(s.total||0).toLocaleString()} indexed · ${Number(s.with_website||0).toLocaleString()} with websites · ${Number(s.with_description||0).toLocaleString()} described</span></div><small>${esc(sources||'Public company sources')}</small></div>`);
-  }catch(e){}
+    const r=await fetch(`/api/workspaces/${activeWorkspaceId}/discover?limit=40&page=${discoverPage}&q=${encodeURIComponent(discoverQuery)}`);
+    if(!r.ok)throw new Error('Could not load Discover results.');
+    const data=await r.json();
+    const metric=document.querySelector('#v7MatchMetric');if(metric)metric.textContent=String(data.total_candidates||0);
+    const list=document.querySelector('#v7TabBody .v7CompanyList');
+    const items=data.items||[];
+    list.innerHTML=items.length?items.map(p=>{
+      const m=p.profile_match||{},reasons=(m.matched||[]).join(' · '),source=shortSource(p.universe_source),quality=qualityLabel(p);
+      return `<article class="v7CompanyRow v73CompanyRow"><div><div class="v7CompanyName notranslate" translate="no">${esc(p.company)}</div><div class="v7CompanyMeta">${esc([p.company_type,p.country,p.audience].filter(Boolean).join(' · '))}</div><div class="v73SourceRow"><span class="v7Level">${esc(p.data_level||'Indexed')}</span><span class="v73Source">${esc(source)}</span><span class="badge ${qualityClass(p)} v73Quality">${esc(quality)} data · ${Number(p.completeness||0)}%</span></div></div><div><div class="v7CompanyDescription">${esc(p.description||'Basic company identity is indexed. Select it to research products, customers, proof and signals.')}</div></div><div class="v7Match"><b>${Number(m.score||0)}%</b><span>${esc(m.label||'Profile match')}</span><div class="v7MatchReasons">${esc(reasons||'Basic criteria')}</div></div><div class="v7CompanyActions"><button class="secondary small ${p.selected?'v7SelectedButton':''}" onclick="toggleV73Company(${Number(p.id)},${p.selected?'true':'false'})">${p.selected?'Selected ✓':'Select'}</button></div></article>`;
+    }).join(''):discoverEmpty('No matches found','Try broader category, region or keyword settings.');
+    const pager=document.getElementById('v73Pager');
+    const pages=Math.max(1,Number(data.pages||1)),current=Math.max(1,Number(data.page||1));
+    if(pager && pages>1)pager.innerHTML=`<div class="v73Pager"><button class="secondary small" ${current<=1?'disabled':''} onclick="goV73DiscoverPage(${current-1})">← Previous</button><span>Page ${current} of ${pages} · ${Number(data.total_candidates||0)} matches</span><button class="secondary small" ${current>=pages?'disabled':''} onclick="goV73DiscoverPage(${current+1})">Next →</button></div>`;
+  }catch(e){const list=document.querySelector('#v7TabBody .v7CompanyList');if(list)list.innerHTML=discoverEmpty('Could not load matches',e.message||'Unknown error')}
 }
+window.goV73DiscoverPage=function(page){renderV73Discover(page,discoverQuery);window.scrollTo({top:0,behavior:'smooth'})};
+window.runV7DiscoverSearch=function(){renderV73Discover(1,document.getElementById('v7DiscoverSearch')?.value||'')};
+window.toggleV73Company=async function(companyId,isSelected){
+  if(!activeWorkspaceId)return;
+  const r=await fetch(`/api/workspaces/${activeWorkspaceId}/selected/${companyId}`,{method:isSelected?'DELETE':'POST'});
+  if(!r.ok){alert('Could not update selection.');return}
+  await window.openV7Workspace(activeWorkspaceId,'discover');
+  setTimeout(()=>renderV73Discover(discoverPage,discoverQuery),0);
+};
 
 async function refreshWorkspaceCompany(){
   if(!activeWorkspaceId||!activeCompanyId)return;
@@ -122,7 +166,7 @@ const oldOpenReport=window.openV7Report;
 if(typeof oldOpenReport==='function')window.openV7Report=async function(companyId){
   activeCompanyId=Number(companyId);activeContext=null;
   const out=await oldOpenReport.apply(this,arguments);
-  activeWorkspaceId=window.__v7ReturnWorkspace||null;
+  activeWorkspaceId=window.__v7ReturnWorkspace||activeWorkspaceId;
   if(activeWorkspaceId){activeContext=await fetchContext(activeWorkspaceId,activeCompanyId);applyContext()}
   return out;
 };
@@ -140,7 +184,17 @@ window.saveOutreach=async function(){
 };
 
 const oldOpenWorkspace=window.openV7Workspace;
-if(typeof oldOpenWorkspace==='function')window.openV7Workspace=async function(...args){activeContext=null;activeCompanyId=null;const out=await oldOpenWorkspace.apply(this,args);setTimeout(decorateDiscover,0);return out};
+if(typeof oldOpenWorkspace==='function')window.openV7Workspace=async function(id,tab='discover'){
+  activeContext=null;activeCompanyId=null;activeWorkspaceId=id;
+  const out=await oldOpenWorkspace.apply(this,arguments);
+  installTaxonomy();
+  if(tab==='discover')setTimeout(()=>renderV73Discover(discoverPage,discoverQuery),0);
+  return out;
+};
 const oldSetTab=window.setV7WorkspaceTab;
-if(typeof oldSetTab==='function')window.setV7WorkspaceTab=async function(...args){const out=await oldSetTab.apply(this,args);setTimeout(decorateDiscover,0);return out};
+if(typeof oldSetTab==='function')window.setV7WorkspaceTab=async function(tab){
+  const out=await oldSetTab.apply(this,arguments);
+  if(tab==='discover')setTimeout(()=>renderV73Discover(discoverPage,discoverQuery),0);
+  return out;
+};
 })();
