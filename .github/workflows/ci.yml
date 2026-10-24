@@ -37,6 +37,7 @@ jobs:
           html = app.home()
           assert isinstance(html, str) and len(html) > 1000
           assert 'LeadScope research failed to start or complete' in html
+          assert 'leadscope_workspace_state_v77' in html
           stats = app.api_data_engine_stats()
           workspace = app.api_workspace_v2()
           suggestions = app.api_workspace_suggestions(6)
@@ -48,7 +49,7 @@ jobs:
           print('LeadScope runtime smoke test OK · version', app.app.version)
           PY
 
-      - name: Workspace v7.6 flow smoke test
+      - name: Workspace v7.7 flow smoke test
         run: |
           python - <<'PY'
           import app
@@ -123,7 +124,7 @@ jobs:
           assert b'Selected companies' not in asset.body
           assert b'Broader candidates' in v73.body and b'Company Universe' in v73.body and b'Workspace fit' in v73.body
           assert remove(ws['id'])['ok'] is True
-          print('Workspace v7.6 flow OK')
+          print('Workspace v7.7 flow OK')
           PY
 
       - name: Check JavaScript syntax
@@ -139,10 +140,11 @@ jobs:
           node --check research_controller_v65.js
           node --check workspace_v70.js
           node --check workspace_v73.js
+          node --check workspace_state_v77.js
 
       - name: Guard against recursive DOM observers
         run: |
-          if grep -q "new MutationObserver" source_quality_v57.js changes_v62.js workspace_v70.js workspace_v73.js research_controller_v65.js; then
+          if grep -q "new MutationObserver" source_quality_v57.js changes_v62.js workspace_v70.js workspace_v73.js research_controller_v65.js workspace_state_v77.js; then
             echo "Global MutationObserver is forbidden in workspace UI because it can create self-triggering browser work."
             exit 1
           fi
