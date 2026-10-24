@@ -26,12 +26,13 @@ jobs:
         run: |
           python -m py_compile app.py app_core.py
           python -m py_compile src/*.py
-          python -m py_compile test_universe_merge.py
+          python -m py_compile test_universe_merge.py test_cordis_source.py
 
       - name: Run backend tests
         run: |
           python run_tests.py
           python test_universe_merge.py
+          python test_cordis_source.py
 
       - name: Runtime API smoke test
         run: |
@@ -45,10 +46,12 @@ jobs:
           workspace = app.api_workspace_v2()
           suggestions = app.api_workspace_suggestions(6)
           library = app.api_library(limit=20)
+          expand = app.api_library_expand_status()
           assert isinstance(stats, dict) and 'total' in stats
           assert isinstance(workspace, dict) and 'counts' in workspace
           assert isinstance(suggestions, dict) and 'items' in suggestions
           assert isinstance(library, dict) and 'items' in library
+          assert 'cordis_offset' in expand and 'cordis_total' in expand and 'source' in expand
           print('LeadScope runtime smoke test OK · version', app.app.version)
           PY
 
