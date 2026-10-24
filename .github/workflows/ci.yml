@@ -48,11 +48,12 @@ jobs:
           print('LeadScope runtime smoke test OK · version', app.app.version)
           PY
 
-      - name: Workspace v7.5 flow smoke test
+      - name: Workspace v7.6 flow smoke test
         run: |
           python - <<'PY'
           import app
           from src.workspace_v7 import profile_match
+          from src.workspace_intelligence import _decision, _decision_reason
 
           def endpoint(path, method='GET'):
               for route in app.app.routes:
@@ -79,29 +80,42 @@ jobs:
           assert ws['id']
           assert any(x['id'] == ws['id'] for x in index()['items'])
           found = discover(ws['id'], q='', limit=10, page=1)
-          assert 'items' in found and 'broader_items' in found and 'total_candidates' in found and 'broader_candidates' in found and 'pages' in found
+          assert 'items' in found and 'broader_items' in found and 'relation_counts' in found
+          assert 'total_candidates' in found and 'broader_candidates' in found and 'pages' in found
           if found['items']:
               cid = int(found['items'][0]['id'])
               select(ws['id'], cid)
               state = detail(ws['id'])
               assert state['counts']['selected'] >= 1
-              assert 'ready' in state and 'source_issues' in state
+              assert 'ready' in state and 'source_issues' in state and 'potential' in state
               ctx = context(ws['id'], cid)
               assert ctx['company_id'] == cid and 'profile_match' in ctx and 'decision' in ctx
 
           strong = profile_match({
-              'company_type':'Fintech','category':'Fintech','audience':'B2B','description':'Payments and payroll software for businesses',
+              'company_type':'Fintech','category':'Fintech','audience':'B2B',
+              'description':'Payments and payroll software for businesses',
               'country':'Poland','city':'Warsaw','team_size_public':''
           }, ws_payload)
           assert 70 <= strong['score'] < 100, strong
-          assert strong['tier'] == 'best'
-          broad = profile_match({
-              'company_type':'Professional services','category':'Technology consulting','audience':'B2B',
-              'description':'Software consulting for clients including the financial services sector',
+          assert strong['tier'] == 'best', strong
+          assert strong['industry_relation']['kind'] == 'primary', strong
+
+          service_profile={
+              'company_type':'Fintech','category':'Fintech','audience':'B2B',
+              'description':'A software development house building custom products for clients across industries including fintech and retail.',
               'country':'Poland','city':'Warsaw','team_size_public':''
-          }, ws_payload)
-          assert broad['score'] < 70, broad
-          assert broad['tier'] == 'broader', broad
+          }
+          service_row={'segment':'Fintech','business_type':'','seed_tags_json':'["fintech","software"]'}
+          service = profile_match(service_profile, ws_payload, service_row)
+          assert service['industry_relation']['kind'] == 'serves', service
+          assert service['industry_points'] <= 8, service
+          assert service['tier'] == 'broader', service
+          assert service['score'] < 60, service
+
+          assert _decision(59, 75, 90, 68) == 'POTENTIAL'
+          assert 'moderate' in _decision_reason('POTENTIAL', 59, 75, 90, 68).lower()
+          assert _decision(70, 25, 90, 56) == 'MONITOR'
+          assert _decision(70, 70, 90, 72) == 'CONTACT'
 
           asset = js_asset()
           v73 = v73_asset()
@@ -109,7 +123,7 @@ jobs:
           assert b'Selected companies' not in asset.body
           assert b'Broader candidates' in v73.body and b'Company Universe' in v73.body and b'Workspace fit' in v73.body
           assert remove(ws['id'])['ok'] is True
-          print('Workspace v7.5 flow OK')
+          print('Workspace v7.6 flow OK')
           PY
 
       - name: Check JavaScript syntax
@@ -128,7 +142,7 @@ jobs:
 
       - name: Guard against recursive DOM observers
         run: |
-          if grep -q "new MutationObserver" source_quality_v57.js changes_v62.js workspace_v70.js workspace_v73.js; then
+          if grep -q "new MutationObserver" source_quality_v57.js changes_v62.js workspace_v70.js workspace_v73.js research_controller_v65.js; then
             echo "Global MutationObserver is forbidden in workspace UI because it can create self-triggering browser work."
             exit 1
           fi
