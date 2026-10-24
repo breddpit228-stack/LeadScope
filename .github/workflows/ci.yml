@@ -116,8 +116,10 @@ jobs:
               'description':'A payment platform and payroll software for businesses',
               'country':'Poland','city':'Warsaw','team_size_public':''
           }, ws_payload, {})
-          assert incomplete['tier'] == 'broader', incomplete
-          assert incomplete['score'] <= 69, incomplete
+          assert incomplete['tier'] == 'best', incomplete
+          assert incomplete['score'] <= 84, incomplete
+          assert incomplete['core_complete'] is True, incomplete
+          assert incomplete['supporting_complete'] is False, incomplete
           assert incomplete['unknown_required'] >= 1, incomplete
           assert 'Company size ?' in incomplete['matched'], incomplete
 
