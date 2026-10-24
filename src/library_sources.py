@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import json
 import random
 import time
+from pathlib import Path
 from typing import Any
 
 import requests
 
+ROOT = Path(__file__).resolve().parents[1]
 WIKIDATA_SPARQL = "https://query.wikidata.org/sparql"
 USER_AGENT = "LeadScope/7.8 (public company-universe indexing; https://github.com/breddpit228-stack/LeadScope)"
 _TRANSIENT_STATUS = {429, 500, 502, 503, 504}
+_CURSOR_PATH = ROOT / "data" / "company_universe_index_state.json"
+_CURSOR_VERSION = 3
 
-# Ordered roughly by expected company-data density so a fresh LeadScope installation
-# becomes useful quickly. Country-sharded queries are substantially cheaper and more
-# reliable than asking WDQS to scan all of Europe for every page.
+# Ordered roughly by expected company-data density so a fresh installation becomes useful
+# quickly. Country-sharded queries are cheaper and more reliable than scanning all Europe.
 EUROPE_WIKIDATA_COUNTRIES: list[tuple[str, str]] = [
     ("United Kingdom", "Q145"), ("Germany", "Q183"), ("France", "Q142"),
     ("Netherlands", "Q55"), ("Sweden", "Q34"), ("Poland", "Q36"),
@@ -50,10 +54,7 @@ def _wikidata_request(query: str, timeout: int, retries: int = 4) -> dict[str, A
             )
             if response.status_code in _TRANSIENT_STATUS:
                 retry_after = response.headers.get("Retry-After")
-                if retry_after and str(retry_after).isdigit():
-                    delay = min(18.0, float(retry_after))
-                else:
-                    delay = min(14.0, (1.7 ** attempt) + random.uniform(0.2, 0.9))
+                delay = min(18.0, float(retry_after)) if retry_after and str(retry_after).isdigit() else min(14.0, (1.7 ** attempt) + random.uniform(0.2, 0.9))
                 last_error = requests.HTTPError(f"Wikidata temporary HTTP {response.status_code}")
                 if attempt < retries - 1:
                     time.sleep(delay)
@@ -71,11 +72,8 @@ def _wikidata_request(query: str, timeout: int, retries: int = 4) -> dict[str, A
 
 
 def _clean_number(value: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
     try:
-        number = int(float(text))
+        number = int(float(str(value or "").strip()))
         return str(number) if number > 0 else ""
     except Exception:
         return ""
@@ -89,12 +87,7 @@ def fetch_wikidata_country_batch(
     timeout: int = 26,
     include_subclasses: bool = False,
 ) -> dict[str, Any]:
-    """Fetch one small country-sharded Wikidata company batch.
-
-    Phase one reads direct instances of business/company. Phase two can include
-    subclasses to widen coverage if the direct pass does not reach the local target.
-    Records are still only *indexed*; they are not treated as deep research.
-    """
+    """Fetch one small country-sharded Wikidata company batch."""
     limit = max(1, min(int(limit), 250))
     offset = max(0, int(offset))
     qid = str(country_qid or "").strip()
@@ -137,11 +130,7 @@ def fetch_wikidata_country_batch(
             continue
         seen.add(website)
         tags = [x for x in [industry, "Wikidata"] if x]
-        description = wikidata_description
-        if not description and industry:
-            description = f"{country_name} company indexed from Wikidata · industry: {industry}."
-        if not description:
-            description = f"{country_name} company indexed from Wikidata with an official website."
+        description = wikidata_description or (f"{country_name} company indexed from Wikidata · industry: {industry}." if industry else f"{country_name} company indexed from Wikidata with an official website.")
         out.append({
             "name": name,
             "website": website,
@@ -166,31 +155,82 @@ def fetch_wikidata_country_companies(
     timeout: int = 26,
     include_subclasses: bool = False,
 ) -> list[dict[str, Any]]:
-    return list(fetch_wikidata_country_batch(
-        country_qid=country_qid,
-        country_name=country_name,
-        limit=limit,
-        offset=offset,
-        timeout=timeout,
-        include_subclasses=include_subclasses,
-    ).get("items") or [])
+    return list(fetch_wikidata_country_batch(country_qid, country_name, limit, offset, timeout, include_subclasses).get("items") or [])
+
+
+def _default_cursor() -> dict[str, Any]:
+    return {"version": _CURSOR_VERSION, "phase": "direct", "country_index": 0, "offset": 0, "checked": 0, "complete": False}
+
+
+def _load_cursor() -> dict[str, Any]:
+    try:
+        value = json.loads(_CURSOR_PATH.read_text(encoding="utf-8"))
+        if isinstance(value, dict) and int(value.get("version") or 0) == _CURSOR_VERSION:
+            return {**_default_cursor(), **value}
+    except Exception:
+        pass
+    return _default_cursor()
+
+
+def _save_cursor(state: dict[str, Any]) -> None:
+    _CURSOR_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _CURSOR_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(_CURSOR_PATH)
+
+
+def _advance_cursor(state: dict[str, Any]) -> None:
+    state["country_index"] = int(state.get("country_index") or 0) + 1
+    state["offset"] = 0
+    if state["country_index"] >= len(EUROPE_WIKIDATA_COUNTRIES):
+        if state.get("phase") == "direct":
+            state["phase"] = "subclasses"
+            state["country_index"] = 0
+        else:
+            state["complete"] = True
+
+
+def company_universe_cursor_status() -> dict[str, Any]:
+    state = _load_cursor()
+    idx = min(max(0, int(state.get("country_index") or 0)), len(EUROPE_WIKIDATA_COUNTRIES) - 1)
+    return {**state, "country": EUROPE_WIKIDATA_COUNTRIES[idx][0] if EUROPE_WIKIDATA_COUNTRIES else ""}
 
 
 def fetch_wikidata_europe_companies(limit: int = 150, offset: int = 0, timeout: int = 28) -> list[dict[str, Any]]:
-    """Compatibility helper retained for older callers.
+    """Return the next resumable Company Universe batch.
 
-    New Company Universe indexing uses country-sharded batches because they are more
-    reliable and can resume deterministically between application restarts.
+    `offset` is retained for API compatibility with the older worker. The real cursor is
+    persisted under data/, so a LeadScope restart continues rather than rescanning UK page 1.
     """
+    del offset
     limit = max(1, min(int(limit), 250))
-    country_index = (max(0, int(offset)) // limit) % len(EUROPE_WIKIDATA_COUNTRIES)
-    country_name, country_qid = EUROPE_WIKIDATA_COUNTRIES[country_index]
-    country_offset = (max(0, int(offset)) // (limit * len(EUROPE_WIKIDATA_COUNTRIES))) * limit
-    return fetch_wikidata_country_companies(
-        country_qid,
-        country_name,
-        limit=limit,
-        offset=country_offset,
-        timeout=timeout,
-        include_subclasses=False,
-    )
+    state = _load_cursor()
+    attempts = 0
+    while not state.get("complete") and attempts < len(EUROPE_WIKIDATA_COUNTRIES) * 2 + 2:
+        attempts += 1
+        idx = int(state.get("country_index") or 0)
+        if idx >= len(EUROPE_WIKIDATA_COUNTRIES):
+            _advance_cursor(state)
+            _save_cursor(state)
+            continue
+        country_name, country_qid = EUROPE_WIKIDATA_COUNTRIES[idx]
+        current_offset = max(0, int(state.get("offset") or 0))
+        batch = fetch_wikidata_country_batch(
+            country_qid=country_qid,
+            country_name=country_name,
+            limit=limit,
+            offset=current_offset,
+            timeout=timeout,
+            include_subclasses=state.get("phase") == "subclasses",
+        )
+        raw_count = int(batch.get("raw_count") or 0)
+        state["checked"] = int(state.get("checked") or 0) + raw_count
+        state["offset"] = current_offset + limit
+        if raw_count == 0 or raw_count < limit or current_offset >= 12000:
+            _advance_cursor(state)
+        _save_cursor(state)
+        items = list(batch.get("items") or [])
+        if items:
+            return items
+    _save_cursor(state)
+    return []
