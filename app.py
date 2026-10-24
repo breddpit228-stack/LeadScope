@@ -24,11 +24,27 @@ from src.storage import (
     get_icp,
     list_companies,
 )
+from src.workspace_match_strict import apply_strict_match
+import src.workspace_v7 as _workspace_v7
 from src.workspace_state import ensure_workspace_initialized, remove_workspace_account, set_workspace_account
 
 ROOT = Path(__file__).resolve().parent
 app = _core.app
-app.version = "7.11"
+app.version = "7.12"
+
+# Keep the original weighted matcher as the scoring base, then apply evidence-aware
+# hard requirements. Patching the module-level function makes Discover, Shortlist and
+# company context use the same strict logic without duplicating the v7 workflow code.
+if not hasattr(_workspace_v7, "_leadscope_base_profile_match"):
+    _workspace_v7._leadscope_base_profile_match = _workspace_v7.profile_match
+
+
+def _strict_workspace_profile_match(profile: dict[str, Any], workspace: dict[str, Any], row: dict[str, Any] | None = None):
+    base = _workspace_v7._leadscope_base_profile_match(profile, workspace, row)
+    return apply_strict_match(base, profile, workspace, row)
+
+
+_workspace_v7.profile_match = _strict_workspace_profile_match
 
 
 def _read(name: str) -> str:
