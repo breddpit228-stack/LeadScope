@@ -13,7 +13,7 @@ from src.data_engine import company_profile as basic_company_profile
 from src.data_engine import summarize_library
 from src.data_engine_ext import company_profile
 from src.identity_resolver import resolve_company_identity
-from src.library_sources import fetch_wikidata_europe_companies
+from src.library_sources import company_universe_cursor_status, fetch_wikidata_europe_companies
 from src.universe_merge import backfill_universe_taxonomy, duplicate_domain_audit, merge_company_items
 from src.storage import (
     company_count,
@@ -26,7 +26,7 @@ from src.workspace_state import ensure_workspace_initialized, remove_workspace_a
 
 ROOT = Path(__file__).resolve().parent
 app = _core.app
-app.version = "7.9"
+app.version = "7.10"
 
 
 def _read(name: str) -> str:
@@ -34,16 +34,30 @@ def _read(name: str) -> str:
     return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
-_LIBRARY_EXPAND = {"status": "idle", "target": 10000, "added": 0, "updated": 0, "taxonomy_updated": 0, "checked": 0, "message": ""}
+_LIBRARY_EXPAND = {
+    "status": "idle",
+    "target": 10000,
+    "added": 0,
+    "updated": 0,
+    "taxonomy_updated": 0,
+    "checked": 0,
+    "heartbeat_at": 0.0,
+    "message": "",
+}
 _LIBRARY_EXPAND_LOCK = threading.Lock()
 
 
 def _library_expand_worker(target: int = 10000) -> None:
     target = max(1000, min(int(target), 10000))
     with _LIBRARY_EXPAND_LOCK:
-        _LIBRARY_EXPAND.update(status="running", target=target, message="Normalizing existing Company Universe profiles…")
+        _LIBRARY_EXPAND.update(
+            status="running",
+            target=target,
+            heartbeat_at=time.time(),
+            message="Normalizing existing Company Universe profiles…",
+        )
     offset = 0
-    batch_size = 250
+    batch_size = 100
     total_added = 0
     total_updated = 0
     taxonomy_updated = 0
@@ -53,10 +67,21 @@ def _library_expand_worker(target: int = 10000) -> None:
         with _LIBRARY_EXPAND_LOCK:
             _LIBRARY_EXPAND.update(
                 taxonomy_updated=taxonomy_updated,
+                heartbeat_at=time.time(),
                 message=f"Normalized {taxonomy_updated} existing profiles · continuing public indexing…",
             )
         while company_count() < target and offset < 30000:
-            items = fetch_wikidata_europe_companies(limit=batch_size, offset=offset)
+            cursor = company_universe_cursor_status()
+            country = str(cursor.get("country") or "public source")
+            phase = str(cursor.get("phase") or "direct")
+            source_offset = int(cursor.get("offset") or 0)
+            with _LIBRARY_EXPAND_LOCK:
+                _LIBRARY_EXPAND.update(
+                    heartbeat_at=time.time(),
+                    message=f"Checking {country} · {phase} · source offset {source_offset:,} · {company_count():,} / {target:,}",
+                )
+
+            items = fetch_wikidata_europe_companies(limit=batch_size, offset=offset, timeout=12)
             if not items:
                 break
             result = merge_company_items(
@@ -67,15 +92,20 @@ def _library_expand_worker(target: int = 10000) -> None:
             total_added += int(result.get("added") or 0)
             total_updated += int(result.get("updated") or 0)
             offset += batch_size
+            cursor = company_universe_cursor_status()
             with _LIBRARY_EXPAND_LOCK:
                 _LIBRARY_EXPAND.update(
                     added=total_added,
                     updated=total_updated,
                     taxonomy_updated=taxonomy_updated,
                     checked=offset,
-                    message=f"{company_count()} companies indexed · {total_updated + taxonomy_updated} profiles enriched · batch {offset // batch_size}",
+                    heartbeat_at=time.time(),
+                    message=(
+                        f"{company_count():,} indexed · {total_updated + taxonomy_updated:,} profiles enriched · "
+                        f"next: {cursor.get('country') or 'public source'} · {cursor.get('phase') or 'direct'}"
+                    ),
                 )
-            time.sleep(0.8)
+            time.sleep(0.5)
         with _LIBRARY_EXPAND_LOCK:
             _LIBRARY_EXPAND.update(
                 status="done",
@@ -83,7 +113,8 @@ def _library_expand_worker(target: int = 10000) -> None:
                 updated=total_updated,
                 taxonomy_updated=taxonomy_updated,
                 checked=offset,
-                message=f"Company Universe contains {company_count()} companies · {total_updated + taxonomy_updated} profiles enriched",
+                heartbeat_at=time.time(),
+                message=f"Company Universe contains {company_count():,} companies · {total_updated + taxonomy_updated:,} profiles enriched",
             )
     except Exception as exc:
         with _LIBRARY_EXPAND_LOCK:
@@ -93,6 +124,7 @@ def _library_expand_worker(target: int = 10000) -> None:
                 updated=total_updated,
                 taxonomy_updated=taxonomy_updated,
                 checked=offset,
+                heartbeat_at=time.time(),
                 message=f"Library expansion paused: {type(exc).__name__}: {str(exc)[:240]}",
             )
 
@@ -110,6 +142,7 @@ def api_library_expand(target: int = 10000):
             updated=0,
             taxonomy_updated=0,
             checked=0,
+            heartbeat_at=time.time(),
             message="Starting Company Universe indexing and enrichment…",
         )
     threading.Thread(target=_library_expand_worker, args=(target,), daemon=True, name="library-expand").start()
@@ -119,7 +152,17 @@ def api_library_expand(target: int = 10000):
 @app.get("/api/library/expand/status")
 def api_library_expand_status():
     with _LIBRARY_EXPAND_LOCK:
-        return dict(_LIBRARY_EXPAND) | {"company_count": company_count()}
+        runtime = dict(_LIBRARY_EXPAND)
+    cursor = company_universe_cursor_status()
+    return runtime | {
+        "company_count": company_count(),
+        "cursor_country": cursor.get("country") or "",
+        "cursor_phase": cursor.get("phase") or "",
+        "cursor_offset": int(cursor.get("offset") or 0),
+        "cursor_checked": int(cursor.get("checked") or 0),
+        "cursor_last_error": cursor.get("last_error") or "",
+        "skipped_shards": len(cursor.get("skipped_shards") or []),
+    }
 
 
 @app.get("/api/company-universe/audit")
